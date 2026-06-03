@@ -34,10 +34,12 @@ public:
     static constexpr int kAnalysisSize = 4096; // power of two
 
     // Live meters (positive dB of gain reduction).
-    float compReductionDb() const { return chain_.compReductionDb(); }
+    float fastCompReductionDb() const { return chain_.fastCompReductionDb(); }
+    float glueCompReductionDb() const { return chain_.glueCompReductionDb(); }
     float deEssReductionDb() const { return chain_.deEssReductionDb(); }
     float limiterReductionDb() const { return chain_.limiterReductionDb(); }
     double loudnessGainDb() const { return chain_.loudnessGainDb(); }
+    float rmsLevelDb() const { return rmsLevelDb_.load(std::memory_order_relaxed); }
 
     // AudioSource
     void prepareToPlay(int samplesPerBlock, double deviceSampleRate) override;
@@ -53,11 +55,13 @@ private:
 
     std::atomic<bool> playing_ { false };
     std::atomic<bool> showAfter_ { false };
+    std::atomic<float> rmsLevelDb_ { -90.0f };
 
     double sourceRate_ = 48000.0;
     double deviceRate_ = 48000.0;
     int blockSize_ = 512;
     double readPos_ = 0.0; // source samples; audio thread only
+    double rmsLin_ = 0.0;  // audio thread only
 
     // Analysis ring for the live spectrum (single producer = audio thread).
     std::vector<float> analysisRing_ = std::vector<float>(kAnalysisSize, 0.0f);

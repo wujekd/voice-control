@@ -12,12 +12,16 @@ void LiveVoiceChain::prepare(int sampleRate, int numChannels) {
     highpass_.assign(static_cast<std::size_t>(numChannels_), Biquad{});
 
     eq_.prepare(numChannels_);
-    comp_.prepare(sampleRate_, active_.compThresholdDb, active_.compRatio,
-                  active_.compAttackMs, active_.compReleaseMs,
-                  active_.compMakeupDb, active_.compKneeDb);
+    fastComp_.prepare(sampleRate_, active_.fastCompThresholdDb, active_.fastCompRatio,
+                      active_.fastCompAttackMs, active_.fastCompReleaseMs,
+                      active_.fastCompMakeupDb, active_.fastCompKneeDb);
+    glueComp_.prepare(sampleRate_, active_.glueCompThresholdDb, active_.glueCompRatio,
+                      active_.glueCompAttackMs, active_.glueCompReleaseMs,
+                      active_.glueCompMakeupDb, active_.glueCompKneeDb);
     deEsser_.prepare(sampleRate_, numChannels_, active_.deEssFreqHz,
                      active_.deEssThresholdDb, active_.deEssRatio,
                      active_.deEssAttackMs, active_.deEssReleaseMs, active_.deEssRangeDb);
+    deEsser_.setPresenceThreshold(active_.deEssPresenceThresholdDb);
     limiter_.prepare(sampleRate_, numChannels_, 5.0 /* ms look-ahead */);
 
     applyParams(active_);
@@ -52,10 +56,15 @@ void LiveVoiceChain::applyParams(const ChainParams& p) {
     for (auto& bq : highpass_)
         bq.setHighpass(sampleRate_, p.highpassHz, p.highpassQ);
     eq_.configure(sampleRate_, fullEqBands(p));
-    comp_.configure(sampleRate_, p.compThresholdDb, p.compRatio, p.compAttackMs,
-                    p.compReleaseMs, p.compMakeupDb, p.compKneeDb);
+    fastComp_.configure(sampleRate_, p.fastCompThresholdDb, p.fastCompRatio,
+                        p.fastCompAttackMs, p.fastCompReleaseMs,
+                        p.fastCompMakeupDb, p.fastCompKneeDb);
+    glueComp_.configure(sampleRate_, p.glueCompThresholdDb, p.glueCompRatio,
+                        p.glueCompAttackMs, p.glueCompReleaseMs,
+                        p.glueCompMakeupDb, p.glueCompKneeDb);
     deEsser_.configure(sampleRate_, p.deEssFreqHz, p.deEssThresholdDb, p.deEssRatio,
                        p.deEssAttackMs, p.deEssReleaseMs, p.deEssRangeDb);
+    deEsser_.setPresenceThreshold(p.deEssPresenceThresholdDb);
     limiter_.configure(sampleRate_, p.limiterCeilingDb, p.limiterReleaseMs);
     recomputeLoudnessGain();
 }
@@ -78,6 +87,17 @@ void LiveVoiceChain::process(float* const* channels, int numChannels, int numFra
     const int nch = std::min(numChannels, static_cast<int>(highpass_.size()));
     if (nch <= 0) return;
 
+    // 0. Calibrated chain drive.
+    const double preGainDb = active_.inputCalibrationGainDb + active_.intensityDriveDb;
+    const float preGain = static_cast<float>(std::pow(10.0, preGainDb / 20.0));
+    if (preGain != 1.0f) {
+        for (int ch = 0; ch < nch; ++ch) {
+            float* d = channels[ch];
+            for (int i = 0; i < numFrames; ++i)
+                d[i] *= preGain;
+        }
+    }
+
     // 1. High-pass.
     for (int ch = 0; ch < nch; ++ch) {
         Biquad& bq = highpass_[static_cast<std::size_t>(ch)];
@@ -89,9 +109,12 @@ void LiveVoiceChain::process(float* const* channels, int numChannels, int numFra
     // 2. EQ (auto-EQ + tone).
     eq_.process(channels, numChannels, numFrames);
 
-    // 3. Compressor.
-    if (active_.compEnabled)
-        comp_.process(channels, numChannels, numFrames);
+    // 3. Fast peak control, then slower glue compression.
+    if (active_.fastCompEnabled)
+        fastComp_.process(channels, numChannels, numFrames);
+
+    if (active_.glueCompEnabled)
+        glueComp_.process(channels, numChannels, numFrames);
 
     // 4. De-esser.
     if (active_.deEssEnabled)

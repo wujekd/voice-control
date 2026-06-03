@@ -46,18 +46,23 @@ void DeEsser::process(float* const* channels, int numChannels, int numFrames) {
 
     for (int i = 0; i < numFrames; ++i) {
         // Band split per channel, and find the linked high-band peak.
-        double peak = 0.0;
+        double highPeak = 0.0;
+        double fullPeak = 0.0;
         for (int ch = 0; ch < nch; ++ch) {
             const float x = channels[ch][i];
             const float low = lowpass_[static_cast<std::size_t>(ch)].process(x);
             const float hi = x - low;
             highScratch_[static_cast<std::size_t>(ch)] = hi;
-            peak = std::max(peak, static_cast<double>(std::fabs(hi)));
+            highPeak = std::max(highPeak, static_cast<double>(std::fabs(hi)));
+            fullPeak = std::max(fullPeak, static_cast<double>(std::fabs(x)));
         }
 
-        const double levelDb = 20.0 * std::log10(peak + 1e-12);
+        const double highLevelDb = 20.0 * std::log10(highPeak + 1e-12);
+        const double fullLevelDb = 20.0 * std::log10(fullPeak + 1e-12);
+        const double presenceDb = highLevelDb - fullLevelDb;
 
-        double gainDb = (levelDb > T) ? slope * (levelDb - T) : 0.0;
+        const double excessDb = std::min(highLevelDb - T, presenceDb - presenceThresholdDb_);
+        double gainDb = (excessDb > 0.0) ? slope * excessDb : 0.0;
         gainDb = std::max(gainDb, -rangeDb_);
 
         const double coeff = (gainDb < envDb_) ? attackCoeff_ : releaseCoeff_;

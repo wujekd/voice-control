@@ -1,6 +1,8 @@
 #include "MainComponent.h"
 
 MainComponent::MainComponent() {
+    setWantsKeyboardFocus(true);
+
     titleLabel_.setText("Voice Control", juce::dontSendNotification);
     titleLabel_.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
     addAndMakeVisible(titleLabel_);
@@ -14,19 +16,10 @@ MainComponent::MainComponent() {
     autoEqButton_.onClick = [this] { applyParamsLive(); updateEqView(); };
     addAndMakeVisible(autoEqButton_);
 
-    presetCaption_.setText("Cleanup", juce::dontSendNotification);
     toneCaption_.setText("Tone", juce::dontSendNotification);
-    strengthCaption_.setText("Strength", juce::dontSendNotification);
-    addAndMakeVisible(presetCaption_);
+    strengthCaption_.setText("Intensity", juce::dontSendNotification);
     addAndMakeVisible(toneCaption_);
     addAndMakeVisible(strengthCaption_);
-
-    presetBox_.addItem("Light", 1);
-    presetBox_.addItem("Balanced", 2);
-    presetBox_.addItem("Strong", 3);
-    presetBox_.setSelectedId(2, juce::dontSendNotification);
-    presetBox_.onChange = [this] { applyParamsLive(); updateEqView(); };
-    addAndMakeVisible(presetBox_);
 
     toneBox_.addItem("Natural", 1);
     toneBox_.addItem("Warm", 2);
@@ -41,25 +34,103 @@ MainComponent::MainComponent() {
     strengthSlider_.onValueChange = [this] { applyParamsLive(); };
     addAndMakeVisible(strengthSlider_);
 
+    auto configureProSlider = [this](juce::Slider& slider, double min, double max,
+                                     double step, double value, const juce::String& suffix) {
+        slider.setRange(min, max, step);
+        slider.setValue(value, juce::dontSendNotification);
+        slider.setTextValueSuffix(suffix);
+        slider.onValueChange = [this] { applyParamsLive(); };
+        addChildComponent(slider);
+    };
+
+    fastThresholdLabel_.setText("Peak Threshold", juce::dontSendNotification);
+    fastRatioLabel_.setText("Peak Ratio", juce::dontSendNotification);
+    glueThresholdLabel_.setText("Glue Threshold", juce::dontSendNotification);
+    glueRatioLabel_.setText("Glue Ratio", juce::dontSendNotification);
+    targetPreChainLabel_.setText("Work Level", juce::dontSendNotification);
+    deEssFreqLabel_.setText("De-ess Freq", juce::dontSendNotification);
+    deEssThresholdLabel_.setText("De-ess Threshold", juce::dontSendNotification);
+    deEssPresenceLabel_.setText("De-ess Presence", juce::dontSendNotification);
+    deEssRatioLabel_.setText("De-ess Ratio", juce::dontSendNotification);
+    deEssRangeLabel_.setText("De-ess Range", juce::dontSendNotification);
+    for (auto* label : { &fastThresholdLabel_, &fastRatioLabel_, &glueThresholdLabel_,
+                         &glueRatioLabel_, &targetPreChainLabel_, &deEssFreqLabel_,
+                         &deEssThresholdLabel_, &deEssPresenceLabel_, &deEssRatioLabel_,
+                         &deEssRangeLabel_ })
+        addChildComponent(label);
+
+    const auto defaults = vc::fixedVoiceCleanupParams();
+    configureProSlider(fastThresholdSlider_, -36.0, -6.0, 0.5, defaults.fastCompThresholdDb, " dB");
+    configureProSlider(fastRatioSlider_, 2.0, 20.0, 0.5, defaults.fastCompRatio, ":1");
+    configureProSlider(glueThresholdSlider_, -36.0, -6.0, 0.5, defaults.glueCompThresholdDb, " dB");
+    configureProSlider(glueRatioSlider_, 1.0, 8.0, 0.1, defaults.glueCompRatio, ":1");
+    configureProSlider(targetPreChainSlider_, -32.0, -18.0, 0.5, defaults.targetPreChainLufs, " LUFS");
+    configureProSlider(deEssFreqSlider_, 3500.0, 9000.0, 100.0, defaults.deEssFreqHz, " Hz");
+    configureProSlider(deEssThresholdSlider_, -60.0, -24.0, 0.5, defaults.deEssThresholdDb, " dB");
+    configureProSlider(deEssPresenceSlider_, -36.0, -6.0, 0.5, defaults.deEssPresenceThresholdDb, " dB");
+    configureProSlider(deEssRatioSlider_, 1.0, 12.0, 0.1, defaults.deEssRatio, ":1");
+    configureProSlider(deEssRangeSlider_, 0.0, 18.0, 0.5, defaults.deEssRangeDb, " dB");
+
+    resetProButton_.onClick = [this] { resetProDefaults(); };
+    resetProButton_.setWantsKeyboardFocus(false);
+    addChildComponent(resetProButton_);
+
+    proPanel_.setVisible(false);
+    addChildComponent(proPanel_);
+    proButton_.onClick = [this] {
+        proPanelVisible_ = !proPanelVisible_;
+        proPanel_.setVisible(proPanelVisible_);
+        for (auto* c : { static_cast<juce::Component*>(&fastThresholdLabel_),
+                         static_cast<juce::Component*>(&fastThresholdSlider_),
+                         static_cast<juce::Component*>(&fastRatioLabel_),
+                         static_cast<juce::Component*>(&fastRatioSlider_),
+                         static_cast<juce::Component*>(&glueThresholdLabel_),
+                         static_cast<juce::Component*>(&glueThresholdSlider_),
+                         static_cast<juce::Component*>(&glueRatioLabel_),
+                         static_cast<juce::Component*>(&glueRatioSlider_),
+                         static_cast<juce::Component*>(&targetPreChainLabel_),
+                         static_cast<juce::Component*>(&targetPreChainSlider_),
+                         static_cast<juce::Component*>(&deEssFreqLabel_),
+                         static_cast<juce::Component*>(&deEssFreqSlider_),
+                         static_cast<juce::Component*>(&deEssThresholdLabel_),
+                         static_cast<juce::Component*>(&deEssThresholdSlider_),
+                         static_cast<juce::Component*>(&deEssPresenceLabel_),
+                         static_cast<juce::Component*>(&deEssPresenceSlider_),
+                         static_cast<juce::Component*>(&deEssRatioLabel_),
+                         static_cast<juce::Component*>(&deEssRatioSlider_),
+                         static_cast<juce::Component*>(&deEssRangeLabel_),
+                         static_cast<juce::Component*>(&deEssRangeSlider_),
+                         static_cast<juce::Component*>(&resetProButton_) })
+            c->setVisible(proPanelVisible_);
+        resized();
+    };
+    proButton_.setWantsKeyboardFocus(false);
+    addAndMakeVisible(proButton_);
+
     playButton_.onClick = [this] { togglePlay(); };
+    playButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(playButton_);
 
     listenButton_.setClickingTogglesState(true);
+    listenButton_.setWantsKeyboardFocus(false);
     listenButton_.setToggleState(true, juce::dontSendNotification); // default: enhanced
     listenButton_.onClick = [this] { updateListenButton(); };
     addAndMakeVisible(listenButton_);
     updateListenButton();
 
     exportButton_.onClick = [this] { doExport(); };
+    exportButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(exportButton_);
 
     statusLabel_.setJustificationType(juce::Justification::centredLeft);
     statusLabel_.setText("Drop a video or audio file to begin.", juce::dontSendNotification);
     addAndMakeVisible(statusLabel_);
 
-    addAndMakeVisible(compMeter_);
+    addAndMakeVisible(fastCompMeter_);
+    addAndMakeVisible(glueCompMeter_);
     addAndMakeVisible(deEssMeter_);
     addAndMakeVisible(limiterMeter_);
+    addAndMakeVisible(vuMeter_);
 
     progressBar_.setVisible(false);
     addAndMakeVisible(progressBar_);
@@ -76,7 +147,8 @@ MainComponent::MainComponent() {
     fftWindow_.resize(static_cast<std::size_t>(fftSize));
     for (int i = 0; i < fftSize; ++i)
         fftWindow_[static_cast<std::size_t>(i)] =
-            0.5f - 0.5f * std::cos(2.0f * juce::MathConstants<float>::pi * i / (fftSize - 1));
+            0.5f - 0.5f * std::cos(2.0f * juce::MathConstants<float>::pi
+                                    * static_cast<float>(i) / static_cast<float>(fftSize - 1));
     liveResult_.fftSize = fftSize;
     liveResult_.binDb.assign(static_cast<std::size_t>(fftSize / 2), -120.0f);
 
@@ -85,7 +157,8 @@ MainComponent::MainComponent() {
     deviceManager_.addAudioCallback(&sourcePlayer_);
 
     startTimerHz(30);
-    setSize(600, 700);
+    setSize(600, 780);
+    grabKeyboardFocus();
 }
 
 MainComponent::~MainComponent() {
@@ -99,14 +172,6 @@ MainComponent::~MainComponent() {
         loudnessWorker_.join();
 }
 
-vc::Preset MainComponent::currentPreset() const {
-    switch (presetBox_.getSelectedId()) {
-        case 1: return vc::Preset::Light;
-        case 3: return vc::Preset::Strong;
-        default: return vc::Preset::Balanced;
-    }
-}
-
 vc::Tone MainComponent::currentTone() const {
     switch (toneBox_.getSelectedId()) {
         case 2: return vc::Tone::Warm;
@@ -116,19 +181,44 @@ vc::Tone MainComponent::currentTone() const {
 }
 
 vc::ChainParams MainComponent::buildParams() const {
-    auto p = vc::paramsForPreset(currentPreset());
+    auto p = vc::fixedVoiceCleanupParams();
     p.tone = currentTone();
 
-    p.autoEqEnabled = autoEqButton_.getToggleState();
-    p.autoEqBands = engine_.autoEqBands(); // computed at load; empty before that
+    p.fastCompThresholdDb = fastThresholdSlider_.getValue();
+    p.fastCompRatio = fastRatioSlider_.getValue();
+    p.glueCompThresholdDb = glueThresholdSlider_.getValue();
+    p.glueCompRatio = glueRatioSlider_.getValue();
+    p.targetPreChainLufs = targetPreChainSlider_.getValue();
+    p.deEssFreqHz = deEssFreqSlider_.getValue();
+    p.deEssThresholdDb = deEssThresholdSlider_.getValue();
+    p.deEssPresenceThresholdDb = deEssPresenceSlider_.getValue();
+    p.deEssRatio = deEssRatioSlider_.getValue();
+    p.deEssRangeDb = deEssRangeSlider_.getValue();
 
-    // Strength scales the dynamics depth live: at 0% the compressor ratio
-    // collapses to 1:1 and the de-esser range to 0 (just EQ + loudness); at
-    // 100% it's the full preset. Loudness targeting stays on regardless.
-    const double s = strengthSlider_.getValue() / 100.0;
-    p.compRatio = 1.0 + (p.compRatio - 1.0) * s;
-    p.deEssRangeDb = p.deEssRangeDb * s;
+    vc::applyIntensity(p, strengthSlider_.getValue() / 100.0);
+    p.deEssRangeDb = deEssRangeSlider_.getValue() * (strengthSlider_.getValue() / 100.0);
+    p.inputCalibrationGainDb = vc::computeCalibrationGainDb(engine_.inputLufs(), p);
+
+    p.autoEqEnabled = autoEqButton_.getToggleState();
+    if (engine_.hasAudio())
+        p.autoEqBands = vc::computeAutoEqBands(engine_.spectrum(), p.baseAutoEqStrength);
+
     return p;
+}
+
+void MainComponent::resetProDefaults() {
+    const auto p = vc::fixedVoiceCleanupParams();
+    fastThresholdSlider_.setValue(p.fastCompThresholdDb, juce::dontSendNotification);
+    fastRatioSlider_.setValue(p.fastCompRatio, juce::dontSendNotification);
+    glueThresholdSlider_.setValue(p.glueCompThresholdDb, juce::dontSendNotification);
+    glueRatioSlider_.setValue(p.glueCompRatio, juce::dontSendNotification);
+    targetPreChainSlider_.setValue(p.targetPreChainLufs, juce::dontSendNotification);
+    deEssFreqSlider_.setValue(p.deEssFreqHz, juce::dontSendNotification);
+    deEssThresholdSlider_.setValue(p.deEssThresholdDb, juce::dontSendNotification);
+    deEssPresenceSlider_.setValue(p.deEssPresenceThresholdDb, juce::dontSendNotification);
+    deEssRatioSlider_.setValue(p.deEssRatio, juce::dontSendNotification);
+    deEssRangeSlider_.setValue(p.deEssRangeDb, juce::dontSendNotification);
+    applyParamsLive();
 }
 
 void MainComponent::updateEqView() {
@@ -202,7 +292,7 @@ void MainComponent::runOnWorker(const juce::String& busyMsg,
     setUiBusy(true, busyMsg);
 
     juce::Component::SafePointer<MainComponent> safe(this);
-    worker_ = std::thread([this, safe, job, onSuccess]() mutable {
+    worker_ = std::thread([safe, job, onSuccess]() mutable {
         const juce::String error = job();
         juce::MessageManager::callAsync([safe, error, onSuccess]() mutable {
             if (safe == nullptr) return;
@@ -227,7 +317,10 @@ void MainComponent::loadFile(const juce::File& file) {
             if (!engine_.loadMedia(file, err))
                 return err.isEmpty() ? "could not read audio from file" : err;
             auto measuredParams = params;
-            measuredParams.autoEqBands = engine_.autoEqBands();
+            measuredParams.inputCalibrationGainDb =
+                vc::computeCalibrationGainDb(engine_.inputLufs(), measuredParams);
+            measuredParams.autoEqBands =
+                vc::computeAutoEqBands(engine_.spectrum(), measuredParams.baseAutoEqStrength);
             initialLoudnessRef_ = engine_.measureChainLoudness(measuredParams);
             return {};
         },
@@ -249,7 +342,7 @@ void MainComponent::loadFile(const juce::File& file) {
 
             const double target = buildParams().targetLufs;
             setUiBusy(false, juce::String::formatted(
-                "Loaded \"%s\"  -  input %.1f LUFS, target %.0f LUFS. Press Play, then use the Hearing button.",
+                "Loaded \"%s\"  -  input %.1f LUFS, calibrated for cleanup, target %.0f LUFS.",
                 file.getFileName().toRawUTF8(), engine_.inputLufs(), target));
         });
 }
@@ -295,6 +388,14 @@ void MainComponent::togglePlay() {
     }
 }
 
+bool MainComponent::keyPressed(const juce::KeyPress& key) {
+    if (key == juce::KeyPress::spaceKey && playButton_.isEnabled()) {
+        togglePlay();
+        return true;
+    }
+    return false;
+}
+
 void MainComponent::updateListenButton() {
     const bool enhanced = listenButton_.getToggleState();
     player_.setShowAfter(enhanced);
@@ -311,10 +412,10 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
 
     dropArea_.setEnabled(!busy);
     const bool haveAudio = engine_.hasAudio();
-    presetBox_.setEnabled(!busy);
     toneBox_.setEnabled(!busy);
     autoEqButton_.setEnabled(!busy);
     strengthSlider_.setEnabled(!busy);
+    proButton_.setEnabled(!busy);
     playButton_.setEnabled(!busy && haveAudio);
     listenButton_.setEnabled(!busy && haveAudio);
     exportButton_.setEnabled(!busy && haveAudio);
@@ -331,9 +432,11 @@ void MainComponent::timerCallback() {
     playButton_.setButtonText(playing ? "Stop" : "Play");
 
     // Meters reflect the live chain while playing; ease back to 0 when stopped.
-    compMeter_.setReduction(playing ? player_.compReductionDb() : 0.0f);
+    fastCompMeter_.setReduction(playing ? player_.fastCompReductionDb() : 0.0f);
+    glueCompMeter_.setReduction(playing ? player_.glueCompReductionDb() : 0.0f);
     deEssMeter_.setReduction(playing ? player_.deEssReductionDb() : 0.0f);
     limiterMeter_.setReduction(playing ? player_.limiterReductionDb() : 0.0f);
+    vuMeter_.setLevelDb(playing ? player_.rmsLevelDb() : -60.0f);
 
     // Animate the spectrum to the playing audio; revert to the average when idle.
     if (playing)
@@ -361,19 +464,42 @@ void MainComponent::resized() {
     autoEqButton_.setBounds(r.removeFromTop(24));
     r.removeFromTop(6);
 
-    auto controls = r.removeFromTop(54);
-    auto left = controls.removeFromLeft(controls.getWidth() / 2).reduced(4);
-    presetCaption_.setBounds(left.removeFromTop(18));
-    presetBox_.setBounds(left);
-    auto right = controls.reduced(4);
-    toneCaption_.setBounds(right.removeFromTop(18));
-    toneBox_.setBounds(right);
+    auto toneRow = r.removeFromTop(54).reduced(4);
+    toneCaption_.setBounds(toneRow.removeFromTop(18));
+    toneBox_.setBounds(toneRow);
     r.removeFromTop(8);
 
     auto strengthRow = r.removeFromTop(44);
     strengthCaption_.setBounds(strengthRow.removeFromLeft(70));
+    proButton_.setBounds(strengthRow.removeFromRight(58).reduced(4, 2));
     strengthSlider_.setBounds(strengthRow);
     r.removeFromTop(8);
+
+    if (proPanelVisible_) {
+        auto proArea = r.removeFromTop(292);
+        proPanel_.setBounds(proArea);
+        proArea.reduce(10, 18);
+
+        auto placePro = [&proArea](juce::Label& label, juce::Slider& slider) {
+            auto row = proArea.removeFromTop(24);
+            label.setBounds(row.removeFromLeft(112));
+            slider.setBounds(row);
+            proArea.removeFromTop(3);
+        };
+        placePro(fastThresholdLabel_, fastThresholdSlider_);
+        placePro(fastRatioLabel_, fastRatioSlider_);
+        placePro(glueThresholdLabel_, glueThresholdSlider_);
+        placePro(glueRatioLabel_, glueRatioSlider_);
+        placePro(targetPreChainLabel_, targetPreChainSlider_);
+        proArea.removeFromTop(4);
+        placePro(deEssFreqLabel_, deEssFreqSlider_);
+        placePro(deEssThresholdLabel_, deEssThresholdSlider_);
+        placePro(deEssPresenceLabel_, deEssPresenceSlider_);
+        placePro(deEssRatioLabel_, deEssRatioSlider_);
+        placePro(deEssRangeLabel_, deEssRangeSlider_);
+        resetProButton_.setBounds(proArea.removeFromTop(28).removeFromRight(90));
+        r.removeFromTop(8);
+    }
 
     auto transport = r.removeFromTop(34);
     playButton_.setBounds(transport.removeFromLeft(90).reduced(2));
@@ -381,12 +507,16 @@ void MainComponent::resized() {
     r.removeFromTop(10);
 
     // Live gain-reduction meters.
-    compMeter_.setBounds(r.removeFromTop(20));
+    fastCompMeter_.setBounds(r.removeFromTop(20));
+    r.removeFromTop(2);
+    glueCompMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(2);
     deEssMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(2);
     limiterMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(12);
+    vuMeter_.setBounds(r.removeFromTop(22));
+    r.removeFromTop(10);
 
     exportButton_.setBounds(r.removeFromTop(38).reduced(2));
     r.removeFromTop(8);

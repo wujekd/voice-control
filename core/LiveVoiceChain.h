@@ -14,7 +14,8 @@
 namespace vc {
 
 // Real-time streaming version of the voice chain, for live preview:
-//   high-pass -> tone EQ -> compressor -> de-esser -> loudness gain -> limiter
+//   pre-gain -> high-pass -> EQ -> peak comp -> glue comp -> de-esser
+//   -> loudness gain -> limiter
 //
 // Differences from the offline VoiceChain:
 //   * processes block-by-block, allocation-free (process() runs on the audio
@@ -36,7 +37,8 @@ public:
     void process(float* const* channels, int numChannels, int numFrames); // audio thread
 
     int latencySamples() const { return limiter_.latencySamples(); }
-    float compReductionDb() const { return comp_.currentReductionDb(); }
+    float fastCompReductionDb() const { return fastComp_.currentReductionDb(); }
+    float glueCompReductionDb() const { return glueComp_.currentReductionDb(); }
     float deEssReductionDb() const { return deEsser_.currentReductionDb(); }
     float limiterReductionDb() const { return limiter_.currentReductionDb(); }
     double loudnessGainDb() const { return loudnessGainDb_.load(std::memory_order_relaxed); }
@@ -50,7 +52,8 @@ private:
 
     std::vector<Biquad> highpass_;
     EqSection eq_;
-    Compressor comp_;
+    Compressor fastComp_;
+    Compressor glueComp_;
     DeEsser deEsser_;
     LiveLimiter limiter_;
 

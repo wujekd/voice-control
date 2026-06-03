@@ -1,5 +1,7 @@
 #include "PreviewPlayer.h"
 
+#include <cmath>
+
 void PreviewPlayer::setDrySource(const juce::AudioBuffer<float>* before, double sourceRate) {
     const juce::ScopedLock sl(lock_);
     before_ = before;
@@ -12,6 +14,8 @@ void PreviewPlayer::clearSources() {
     const juce::ScopedLock sl(lock_);
     before_ = nullptr;
     readPos_ = 0.0;
+    rmsLin_ = 0.0;
+    rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
 }
 
 void PreviewPlayer::start() {
@@ -23,6 +27,7 @@ void PreviewPlayer::start() {
 
 void PreviewPlayer::stop() {
     playing_.store(false);
+    rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
 }
 
 double PreviewPlayer::getPositionNormalised() const {
@@ -94,15 +99,23 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
 
     // 4. Capture the heard output (mono mix) for the live spectrum analyzer.
     int w = analysisWrite_.load(std::memory_order_relaxed);
+    double sumSquares = 0.0;
     for (int i = 0; i < produced; ++i) {
         float mono = 0.0f;
         for (int ch = 0; ch < outChannels; ++ch)
             mono += info.buffer->getSample(ch, info.startSample + i);
-        mono /= juce::jmax(1, outChannels);
+        mono /= static_cast<float>(juce::jmax(1, outChannels));
+        sumSquares += static_cast<double>(mono) * mono;
         analysisRing_[static_cast<std::size_t>(w & (kAnalysisSize - 1))] = mono;
         ++w;
     }
     analysisWrite_.store(w, std::memory_order_release);
+
+    const double blockRms = std::sqrt(sumSquares / juce::jmax(1, produced));
+    const double coeff = std::exp(-static_cast<double>(produced) / (deviceRate_ * 0.30));
+    rmsLin_ = coeff * rmsLin_ + (1.0 - coeff) * blockRms;
+    rmsLevelDb_.store(static_cast<float>(20.0 * std::log10(rmsLin_ + 1e-9)),
+                      std::memory_order_relaxed);
 }
 
 void PreviewPlayer::readAnalysisBlock(float* dest, int n) const {

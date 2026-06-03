@@ -2,6 +2,8 @@
 
 #include "Eq.h"
 
+#include <algorithm>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -25,12 +27,13 @@ struct ChainParams {
 
     // De-esser (sibilance control)
     bool deEssEnabled = true;
-    double deEssFreqHz = 6000.0;
-    double deEssThresholdDb = -30.0;
-    double deEssRatio = 4.0;
-    double deEssAttackMs = 1.0;
+    double deEssFreqHz = 6200.0;
+    double deEssThresholdDb = -37.0;
+    double deEssPresenceThresholdDb = -18.0;
+    double deEssRatio = 5.0;
+    double deEssAttackMs = 0.5;
     double deEssReleaseMs = 60.0;
-    double deEssRangeDb = 12.0;
+    double deEssRangeDb = 8.0;
 
     // Compressor (dynamics)
     bool compEnabled = true;
@@ -40,6 +43,33 @@ struct ChainParams {
     double compReleaseMs = 120.0;
     double compMakeupDb = 0.0; // loudness stage handles overall level
     double compKneeDb = 6.0;
+
+    // Fixed-chain calibration and intensity drive. The loaded file is first
+    // trimmed to this working level; intensity then pushes relative to it.
+    double inputCalibrationGainDb = 0.0;
+    double intensityDriveDb = 0.0;
+    double targetPreChainLufs = -24.0;
+    double minCalibrationGainDb = -18.0;
+    double maxCalibrationGainDb = 18.0;
+
+    // Two-stage fixed voice compression.
+    bool fastCompEnabled = true;
+    double fastCompThresholdDb = -18.0;
+    double fastCompRatio = 10.0;
+    double fastCompAttackMs = 1.5;
+    double fastCompReleaseMs = 45.0;
+    double fastCompMakeupDb = 0.0;
+    double fastCompKneeDb = 4.0;
+
+    bool glueCompEnabled = true;
+    double glueCompThresholdDb = -24.0;
+    double glueCompRatio = 2.5;
+    double glueCompAttackMs = 20.0;
+    double glueCompReleaseMs = 180.0;
+    double glueCompMakeupDb = 0.0;
+    double glueCompKneeDb = 8.0;
+
+    double baseAutoEqStrength = 0.6;
 
     // Loudness normalisation (absolute level, LUFS)
     bool loudnessEnabled = true;
@@ -96,6 +126,42 @@ inline ChainParams paramsForPreset(Preset p) {
             break;
     }
     return params;
+}
+
+inline ChainParams fixedVoiceCleanupParams() {
+    ChainParams params;
+    params.highpassHz = 85.0;
+    params.targetLufs = -16.0;
+    params.limiterEnabled = true;
+    params.limiterCeilingDb = -1.0;
+    params.deEssFreqHz = 6200.0;
+    params.deEssThresholdDb = -37.0;
+    params.deEssPresenceThresholdDb = -18.0;
+    params.deEssRatio = 5.0;
+    params.deEssAttackMs = 0.5;
+    params.deEssReleaseMs = 60.0;
+    params.deEssRangeDb = 8.0;
+    return params;
+}
+
+inline double computeCalibrationGainDb(double measuredInputLufs, const ChainParams& params) {
+    if (!std::isfinite(measuredInputLufs))
+        return 0.0;
+    return std::clamp(params.targetPreChainLufs - measuredInputLufs,
+                      params.minCalibrationGainDb,
+                      params.maxCalibrationGainDb);
+}
+
+inline double intensityToDriveDb(double intensity01) {
+    const double s = std::clamp(intensity01, 0.0, 1.0);
+    return -6.0 + 14.0 * s;
+}
+
+inline void applyIntensity(ChainParams& params, double intensity01) {
+    const double s = std::clamp(intensity01, 0.0, 1.0);
+    params.intensityDriveDb = intensityToDriveDb(s);
+    params.deEssRangeDb = 8.0 * s;
+    params.baseAutoEqStrength = 0.6 * s;
 }
 
 // Returns true and sets `out` if `name` matches a known preset.

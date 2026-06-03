@@ -1,5 +1,7 @@
 #include "VoiceChain.h"
 
+#include <cmath>
+
 namespace vc {
 
 void VoiceChain::prepare(int sampleRate, int numChannels, const ChainParams& params) {
@@ -12,14 +14,19 @@ void VoiceChain::prepare(int sampleRate, int numChannels, const ChainParams& par
     eq_.prepare(numChannels);
     eq_.configure(sampleRate, fullEqBands(params_));
 
-    comp_.prepare(sampleRate, params_.compThresholdDb, params_.compRatio,
-                  params_.compAttackMs, params_.compReleaseMs,
-                  params_.compMakeupDb, params_.compKneeDb);
+    fastComp_.prepare(sampleRate, params_.fastCompThresholdDb, params_.fastCompRatio,
+                      params_.fastCompAttackMs, params_.fastCompReleaseMs,
+                      params_.fastCompMakeupDb, params_.fastCompKneeDb);
+
+    glueComp_.prepare(sampleRate, params_.glueCompThresholdDb, params_.glueCompRatio,
+                      params_.glueCompAttackMs, params_.glueCompReleaseMs,
+                      params_.glueCompMakeupDb, params_.glueCompKneeDb);
 
     deEsser_.prepare(sampleRate, numChannels, params_.deEssFreqHz,
                      params_.deEssThresholdDb, params_.deEssRatio,
                      params_.deEssAttackMs, params_.deEssReleaseMs,
                      params_.deEssRangeDb);
+    deEsser_.setPresenceThreshold(params_.deEssPresenceThresholdDb);
 
     loudness_.prepare(sampleRate, params_.targetLufs);
 
@@ -30,6 +37,17 @@ void VoiceChain::prepare(int sampleRate, int numChannels, const ChainParams& par
 void VoiceChain::process(AudioBuffer& buffer) {
     const int channels = buffer.numChannels();
     const std::size_t frames = buffer.numFrames();
+
+    // 0. Calibrated chain drive.
+    const double preGainDb = params_.inputCalibrationGainDb + params_.intensityDriveDb;
+    const float preGain = static_cast<float>(std::pow(10.0, preGainDb / 20.0));
+    if (preGain != 1.0f) {
+        for (int ch = 0; ch < channels; ++ch) {
+            float* data = buffer.channels[static_cast<std::size_t>(ch)].data();
+            for (std::size_t i = 0; i < frames; ++i)
+                data[i] *= preGain;
+        }
+    }
 
     // 1. High-pass (rumble removal), streamed per channel.
     for (int ch = 0; ch < channels && ch < static_cast<int>(highpass_.size()); ++ch) {
@@ -42,9 +60,12 @@ void VoiceChain::process(AudioBuffer& buffer) {
     // 2. EQ (auto-EQ + tone).
     eq_.process(buffer);
 
-    // 3. Compressor (dynamics).
-    if (params_.compEnabled)
-        comp_.process(buffer);
+    // 3. Fast peak control, then slower glue compression.
+    if (params_.fastCompEnabled)
+        fastComp_.process(buffer);
+
+    if (params_.glueCompEnabled)
+        glueComp_.process(buffer);
 
     // 4. De-esser (sibilance), after compression which can accentuate it.
     if (params_.deEssEnabled)

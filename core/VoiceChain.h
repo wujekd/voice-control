@@ -14,7 +14,8 @@
 namespace vc {
 
 // The portable voice-enhancement chain:
-//   high-pass -> EQ (auto+tone) -> compressor -> de-esser -> loudness -> limiter
+//   pre-gain -> high-pass -> EQ -> peak comp -> glue comp -> de-esser
+//   -> loudness -> limiter
 // No JUCE / platform dependencies — reusable from CLI, JUCE, or a backend.
 class VoiceChain {
 public:
@@ -27,12 +28,16 @@ public:
     // Loudness diagnostics from the last process() call.
     double measuredInputLufs() const { return loudness_.lastInputLufs(); }
     double appliedLoudnessGainDb() const { return loudness_.lastAppliedGainDb(); }
+    float fastCompReductionDb() const { return fastComp_.currentReductionDb(); }
+    float glueCompReductionDb() const { return glueComp_.currentReductionDb(); }
+    float deEssReductionDb() const { return deEsser_.currentReductionDb(); }
 
 private:
     ChainParams params_;
     std::vector<Biquad> highpass_; // one per channel
     EqSection eq_;
-    Compressor comp_;
+    Compressor fastComp_;
+    Compressor glueComp_;
     DeEsser deEsser_;
     LoudnessNormalizer loudness_;
     Limiter limiter_;

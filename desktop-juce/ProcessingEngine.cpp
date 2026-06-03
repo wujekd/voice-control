@@ -6,6 +6,8 @@
 #include "VoiceChain.h"         // vc::VoiceChain
 #include "WavIo.h"              // vc::readWav / writeWavFloat32
 
+#include <algorithm>
+#include <cmath>
 #include <exception>
 #include <limits>
 
@@ -50,6 +52,12 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
     vc::LoudnessNormalizer meter;
     meter.prepare(original_.sampleRate, 0.0);
     inputLufs_ = meter.measureIntegratedLufs(original_);
+
+    double peak = 0.0;
+    for (const auto& ch : original_.channels)
+        for (float s : ch)
+            peak = std::max(peak, static_cast<double>(std::fabs(s)));
+    inputPeakDb_ = 20.0 * std::log10(peak + 1e-12);
 
     // Analyse the whole-file spectrum and derive the wide auto-EQ curve.
     spectrum_ = vc::SpectrumAnalyzer::analyze(original_, 12);

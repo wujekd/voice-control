@@ -24,6 +24,9 @@ public:
                  double releaseMs, double rangeDb);
     void configure(int sampleRate, double crossoverHz, double thresholdDb,
                    double ratio, double attackMs, double releaseMs, double rangeDb);
+    void setPresenceThreshold(double presenceThresholdDb) {
+        presenceThresholdDb_ = presenceThresholdDb;
+    }
     void reset();
 
     void process(AudioBuffer& buffer);
@@ -35,6 +38,7 @@ private:
     std::vector<Biquad> lowpass_;     // one per channel, defines the band split
     std::vector<float> highScratch_;  // per-channel high band, preallocated
     double thresholdDb_ = -30.0;
+    double presenceThresholdDb_ = -18.0;
     double ratio_ = 4.0;
     double rangeDb_ = 12.0; // max attenuation of the high band
     double attackCoeff_ = 0.0;

@@ -32,6 +32,9 @@ target_include_directories(vc_video PUBLIC video)
 add_executable(voice-control app/main.cpp)
 target_link_libraries(voice-control PRIVATE vc_core vc_video)
 
+add_executable(vc-dsp-tests tests/DspBehaviorTests.cpp)
+target_link_libraries(vc-dsp-tests PRIVATE vc_core)
+
 # JUCE desktop app (drag/drop, A/B preview, export).
 option(VC_BUILD_APP "Build the JUCE desktop app" ON)
 if(VC_BUILD_APP)

@@ -42,6 +42,7 @@ public:
     // Integrated loudness of the (unprocessed) input, measured once at load.
     // May be -inf for silence.
     double inputLufs() const { return inputLufs_; }
+    double inputPeakDb() const { return inputPeakDb_; }
 
     // Integrated loudness of the signal *reaching* the loudness stage, i.e.
     // after HPF -> EQ -> compressor -> de-esser for the given params (loudness
@@ -68,6 +69,7 @@ private:
     vc::SpectrumResult spectrum_;
     std::vector<vc::EqBand> autoEqBands_;
     double inputLufs_ = 0.0;
+    double inputPeakDb_ = -120.0;
     double lastInputLufs_ = 0.0;
     double lastGainDb_ = 0.0;
 };
