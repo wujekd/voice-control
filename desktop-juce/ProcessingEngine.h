@@ -34,8 +34,10 @@ public:
     const std::vector<vc::EqBand>& autoEqBands() const { return autoEqBands_; }
 
     bool hasAudio() const { return original_.numFrames() > 0; }
+    bool hasDenoised() const { return denoisedReady_; }
     bool hasProcessed() const { return processedReady_; }
     const juce::AudioBuffer<float>& beforeBuffer() const { return beforeJuce_; }
+    const juce::AudioBuffer<float>& denoisedBuffer() const { return denoisedJuce_; }
     const juce::AudioBuffer<float>& afterBuffer() const { return afterJuce_; }
     double sampleRate() const { return static_cast<double>(original_.sampleRate); }
 
@@ -58,11 +60,18 @@ public:
 
 private:
     static juce::AudioBuffer<float> toJuce(const vc::AudioBuffer& src);
+    static vc::AudioBuffer blendNoiseReduction(const vc::AudioBuffer& original,
+                                               const vc::AudioBuffer& denoised,
+                                               double amount);
+    bool buildDenoisedCache(const juce::File& inputWav, juce::String& error);
 
     vc::AudioBuffer original_;
+    vc::AudioBuffer denoised_;
     vc::AudioBuffer processed_;
     juce::AudioBuffer<float> beforeJuce_;
+    juce::AudioBuffer<float> denoisedJuce_;
     juce::AudioBuffer<float> afterJuce_;
+    bool denoisedReady_ = false;
     bool processedReady_ = false;
     juce::File sourceFile_;
     bool sourceHasVideo_ = false;

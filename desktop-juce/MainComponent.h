@@ -57,9 +57,10 @@ private:
     FileDropComponent dropArea_;
     SpectrumView spectrumView_;
     juce::Label titleLabel_;
-    juce::Label toneCaption_, strengthCaption_;
+    juce::Label toneCaption_, noiseReductionCaption_, strengthCaption_;
     juce::ComboBox toneBox_;
     juce::ToggleButton autoEqButton_ { "Auto-EQ (spectral)" };
+    juce::Slider noiseReductionSlider_;
     juce::Slider strengthSlider_;
     juce::TextButton proButton_ { "Pro" };
     juce::GroupComponent proPanel_ { "proPanel", "Pro" };

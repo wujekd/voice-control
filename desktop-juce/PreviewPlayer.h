@@ -15,9 +15,11 @@
 class PreviewPlayer : public juce::AudioSource {
 public:
     void setDrySource(const juce::AudioBuffer<float>* before, double sourceRate);
+    void setDenoisedSource(const juce::AudioBuffer<float>* denoised);
     void clearSources();
 
     void setParams(const vc::ChainParams& params) { chain_.setParams(params); }
+    void setNoiseReductionAmount(double amount);
     void setInputLoudness(double lufs) { chain_.setInputLoudness(lufs); }
 
     void start();
@@ -49,12 +51,14 @@ public:
 private:
     juce::CriticalSection lock_;
     const juce::AudioBuffer<float>* before_ = nullptr;
+    const juce::AudioBuffer<float>* denoised_ = nullptr;
 
     vc::LiveVoiceChain chain_;
     juce::AudioBuffer<float> scratch_; // wet render scratch, preallocated
 
     std::atomic<bool> playing_ { false };
     std::atomic<bool> showAfter_ { false };
+    std::atomic<float> noiseReductionAmount_ { 1.0f };
     std::atomic<float> rmsLevelDb_ { -90.0f };
 
     double sourceRate_ = 48000.0;

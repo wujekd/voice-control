@@ -13,6 +13,10 @@ namespace vc {
 // stage (de-esser, tone EQ, ...) means adding fields here, not changing the
 // chain's interface.
 struct ChainParams {
+    // Noise removal blend. The denoised signal is cached outside the core
+    // chain, then blended with the original before EQ/compression/etc.
+    double noiseReductionAmount = 1.0; // 0 = original, 1 = denoised
+
     // High-pass (rumble removal)
     double highpassHz = 90.0;
     double highpassQ = 0.7071;

@@ -17,8 +17,10 @@ MainComponent::MainComponent() {
     addAndMakeVisible(autoEqButton_);
 
     toneCaption_.setText("Tone", juce::dontSendNotification);
+    noiseReductionCaption_.setText("Noise Reduction", juce::dontSendNotification);
     strengthCaption_.setText("Intensity", juce::dontSendNotification);
     addAndMakeVisible(toneCaption_);
+    addAndMakeVisible(noiseReductionCaption_);
     addAndMakeVisible(strengthCaption_);
 
     toneBox_.addItem("Natural", 1);
@@ -27,6 +29,12 @@ MainComponent::MainComponent() {
     toneBox_.setSelectedId(1, juce::dontSendNotification);
     toneBox_.onChange = [this] { applyParamsLive(); updateEqView(); };
     addAndMakeVisible(toneBox_);
+
+    noiseReductionSlider_.setRange(0.0, 100.0, 1.0);
+    noiseReductionSlider_.setValue(100.0, juce::dontSendNotification);
+    noiseReductionSlider_.setTextValueSuffix(" %");
+    noiseReductionSlider_.onValueChange = [this] { applyParamsLive(); };
+    addAndMakeVisible(noiseReductionSlider_);
 
     strengthSlider_.setRange(0.0, 100.0, 1.0);
     strengthSlider_.setValue(100.0, juce::dontSendNotification);
@@ -138,6 +146,7 @@ MainComponent::MainComponent() {
     playButton_.setEnabled(false);
     listenButton_.setEnabled(false);
     exportButton_.setEnabled(false);
+    noiseReductionSlider_.setEnabled(false);
 
     // Live-spectrum FFT buffers.
     const int fftSize = 1 << kFftOrder;
@@ -157,7 +166,7 @@ MainComponent::MainComponent() {
     deviceManager_.addAudioCallback(&sourcePlayer_);
 
     startTimerHz(30);
-    setSize(600, 780);
+    setSize(600, 830);
     grabKeyboardFocus();
 }
 
@@ -183,6 +192,7 @@ vc::Tone MainComponent::currentTone() const {
 vc::ChainParams MainComponent::buildParams() const {
     auto p = vc::fixedVoiceCleanupParams();
     p.tone = currentTone();
+    p.noiseReductionAmount = noiseReductionSlider_.getValue() / 100.0;
 
     p.fastCompThresholdDb = fastThresholdSlider_.getValue();
     p.fastCompRatio = fastRatioSlider_.getValue();
@@ -260,7 +270,9 @@ void MainComponent::updateLiveSpectrum() {
 
 void MainComponent::applyParamsLive() {
     if (!engine_.hasAudio()) return;
-    player_.setParams(buildParams());      // instant: sound changes now
+    const auto params = buildParams();
+    player_.setNoiseReductionAmount(params.noiseReductionAmount);
+    player_.setParams(params);             // instant: sound changes now
     loudnessCountdown_ = 4;                 // ~200ms debounce, then refine loudness
 }
 
@@ -326,8 +338,9 @@ void MainComponent::loadFile(const juce::File& file) {
         },
         [this, file]() {
             player_.setDrySource(&engine_.beforeBuffer(), engine_.sampleRate());
+            player_.setDenoisedSource(engine_.hasDenoised() ? &engine_.denoisedBuffer() : nullptr);
             player_.setInputLoudness(initialLoudnessRef_);
-            player_.setParams(buildParams());
+            applyParamsLive();
 
             playButton_.setEnabled(true);
             listenButton_.setEnabled(true);
@@ -341,9 +354,10 @@ void MainComponent::loadFile(const juce::File& file) {
             updateEqView();
 
             const double target = buildParams().targetLufs;
+            const auto denoise = engine_.hasDenoised() ? "noise cache ready" : "noise cache unavailable";
             setUiBusy(false, juce::String::formatted(
-                "Loaded \"%s\"  -  input %.1f LUFS, calibrated for cleanup, target %.0f LUFS.",
-                file.getFileName().toRawUTF8(), engine_.inputLufs(), target));
+                "Loaded \"%s\"  -  %s, input %.1f LUFS, target %.0f LUFS.",
+                file.getFileName().toRawUTF8(), denoise, engine_.inputLufs(), target));
         });
 }
 
@@ -414,6 +428,7 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
     const bool haveAudio = engine_.hasAudio();
     toneBox_.setEnabled(!busy);
     autoEqButton_.setEnabled(!busy);
+    noiseReductionSlider_.setEnabled(!busy && haveAudio && engine_.hasDenoised());
     strengthSlider_.setEnabled(!busy);
     proButton_.setEnabled(!busy);
     playButton_.setEnabled(!busy && haveAudio);
@@ -467,6 +482,11 @@ void MainComponent::resized() {
     auto toneRow = r.removeFromTop(54).reduced(4);
     toneCaption_.setBounds(toneRow.removeFromTop(18));
     toneBox_.setBounds(toneRow);
+    r.removeFromTop(8);
+
+    auto noiseRow = r.removeFromTop(44);
+    noiseReductionCaption_.setBounds(noiseRow.removeFromLeft(118));
+    noiseReductionSlider_.setBounds(noiseRow);
     r.removeFromTop(8);
 
     auto strengthRow = r.removeFromTop(44);

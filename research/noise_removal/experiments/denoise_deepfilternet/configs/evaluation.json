@@ -1,0 +1,31 @@
+{
+  "candidate": "DeepFilterNet",
+  "preferred_model": "DeepFilterNet2_or_DeepFilterNet3",
+  "sample_rate_hz": 48000,
+  "input_glob": "data/input/*.wav",
+  "output_dir": "data/output",
+  "listening_checks": [
+    "noise removal strength",
+    "consonant preservation",
+    "speaker identity preservation",
+    "room tone stability",
+    "musical noise",
+    "watery or phasey artifacts",
+    "pumping",
+    "high-frequency dullness"
+  ],
+  "runtime_checks": [
+    "model load time",
+    "offline processing speed",
+    "real-time factor",
+    "algorithmic latency",
+    "CPU use",
+    "memory use",
+    "C++ integration path"
+  ],
+  "candidate_decision": {
+    "keep": "Quality is strong and runtime path is plugin-feasible.",
+    "modify": "Quality is strong but model/runtime needs distillation, export, or porting.",
+    "reject": "Artifacts or latency are not acceptable for responsive voiceover work."
+  }
+}

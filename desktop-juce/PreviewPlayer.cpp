@@ -9,10 +9,21 @@ void PreviewPlayer::setDrySource(const juce::AudioBuffer<float>* before, double 
     readPos_ = 0.0;
 }
 
+void PreviewPlayer::setDenoisedSource(const juce::AudioBuffer<float>* denoised) {
+    const juce::ScopedLock sl(lock_);
+    denoised_ = denoised;
+}
+
+void PreviewPlayer::setNoiseReductionAmount(double amount) {
+    noiseReductionAmount_.store(static_cast<float>(juce::jlimit(0.0, 1.0, amount)),
+                                std::memory_order_relaxed);
+}
+
 void PreviewPlayer::clearSources() {
     stop();
     const juce::ScopedLock sl(lock_);
     before_ = nullptr;
+    denoised_ = nullptr;
     readPos_ = 0.0;
     rmsLin_ = 0.0;
     rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
@@ -83,11 +94,35 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
     readPos_ = pos;
     if (produced == 0) return;
 
-    // 2. Copy dry -> scratch and process it (wet) through the live chain.
+    // 2. Build the noise-reduction blend -> scratch and process it through the
+    //    live chain. The original button still hears the untouched dry buffer.
     //    The chain always runs so the meters stay live and warm.
     const int procCh = juce::jmin(outChannels, scratch_.getNumChannels());
-    for (int ch = 0; ch < procCh; ++ch)
-        scratch_.copyFrom(ch, 0, *info.buffer, ch, info.startSample, produced);
+    const auto* den = denoised_;
+    const float wet = (den != nullptr && den->getNumSamples() > 1)
+        ? noiseReductionAmount_.load(std::memory_order_relaxed)
+        : 0.0f;
+    const float dry = 1.0f - wet;
+    if (wet <= 0.0f) {
+        for (int ch = 0; ch < procCh; ++ch)
+            scratch_.copyFrom(ch, 0, *info.buffer, ch, info.startSample, produced);
+    } else {
+        const int denChannels = den->getNumChannels();
+        const int denLen = den->getNumSamples();
+        double denPos = readPos_ - produced * ratio;
+        for (int i = 0; i < produced; ++i) {
+            const int i0 = static_cast<int>(juce::jlimit(0.0, static_cast<double>(denLen - 2), denPos));
+            const float frac = static_cast<float>(denPos - i0);
+            for (int ch = 0; ch < procCh; ++ch) {
+                const int dc = juce::jmin(ch, denChannels - 1);
+                const float* d = den->getReadPointer(dc);
+                const float denSample = d[i0] + frac * (d[i0 + 1] - d[i0]);
+                const float origSample = info.buffer->getSample(ch, info.startSample + i);
+                scratch_.setSample(ch, i, dry * origSample + wet * denSample);
+            }
+            denPos += ratio;
+        }
+    }
 
     chain_.process(scratch_.getArrayOfWritePointers(), procCh, produced);
 
