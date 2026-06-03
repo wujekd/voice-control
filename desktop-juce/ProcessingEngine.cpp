@@ -143,6 +143,51 @@ bool ProcessingEngine::buildDenoisedCache(const juce::File& inputWav, juce::Stri
     return denoisedReady_;
 }
 
+void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips) {
+    const int destChannels = dest.numChannels();
+    const std::size_t destFrames = dest.numFrames();
+    if (destChannels <= 0 || destFrames == 0)
+        return;
+
+    for (const auto& clip : clips) {
+        if (clip.audio.getNumSamples() <= 1 || clip.sampleRate <= 0.0)
+            continue;
+
+        const int startFrame = static_cast<int>(std::max(0.0, clip.startSeconds) * dest.sampleRate);
+        if (startFrame >= static_cast<int>(destFrames))
+            continue;
+
+        const float gain = static_cast<float>(std::pow(10.0, clip.gainDb / 20.0));
+        const double srcRatio = clip.sampleRate / static_cast<double>(dest.sampleRate);
+        const int clipSamples = clip.audio.getNumSamples();
+        const int maxFrames = static_cast<int>(std::min<std::size_t>(
+            destFrames - static_cast<std::size_t>(startFrame),
+            static_cast<std::size_t>(std::ceil(clip.durationSeconds() * dest.sampleRate))));
+        const double clipDuration = clip.durationSeconds();
+
+        for (int i = 0; i < maxFrames; ++i) {
+            const double clipTime = static_cast<double>(i) / dest.sampleRate;
+            double fade = 1.0;
+            if (clip.fadeInSeconds > 0.0)
+                fade = std::min(fade, clipTime / clip.fadeInSeconds);
+            if (clip.fadeOutSeconds > 0.0)
+                fade = std::min(fade, (clipDuration - clipTime) / clip.fadeOutSeconds);
+            fade = std::clamp(fade, 0.0, 1.0);
+
+            const double srcPos = i * srcRatio;
+            const int i0 = static_cast<int>(std::clamp(srcPos, 0.0, static_cast<double>(clipSamples - 2)));
+            const float frac = static_cast<float>(srcPos - i0);
+            for (int ch = 0; ch < destChannels; ++ch) {
+                const int sc = std::min(ch, clip.audio.getNumChannels() - 1);
+                const float* src = clip.audio.getReadPointer(sc);
+                const float sample = src[i0] + frac * (src[i0 + 1] - src[i0]);
+                auto& channel = dest.channels[static_cast<std::size_t>(ch)];
+                channel[static_cast<std::size_t>(startFrame + i)] += sample * gain * static_cast<float>(fade);
+            }
+        }
+    }
+}
+
 bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
     // ffmpeg decodes both video and bare audio files; -vn just no-ops on audio.
     auto temp = juce::File::createTempFile(".wav");
@@ -158,6 +203,7 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
     }
     sourceFile_ = media;
     sourceHasVideo_ = extensionIsVideo(media);
+    musicClips_.clear();
     beforeJuce_ = toJuce(original_);
     denoisedJuce_ = beforeJuce_;
     afterJuce_ = beforeJuce_; // until processed
@@ -183,6 +229,55 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
     temp.deleteFile();
     processedReady_ = false;
     return true;
+}
+
+bool ProcessingEngine::addMusicClip(const juce::File& audioFile, juce::String& error) {
+    if (!hasAudio()) {
+        error = "Load voice/video audio before adding music.";
+        return false;
+    }
+
+    auto temp = juce::File::createTempFile(".wav");
+    vc::AudioBuffer decoded;
+    try {
+        vc::FFmpeg ffmpeg;
+        ffmpeg.extractAudio(audioFile.getFullPathName().toStdString(),
+                            temp.getFullPathName().toStdString());
+        decoded = vc::readWav(temp.getFullPathName().toStdString());
+    } catch (const std::exception& e) {
+        temp.deleteFile();
+        error = e.what();
+        return false;
+    }
+    temp.deleteFile();
+
+    MusicClip clip;
+    clip.name = audioFile.getFileName();
+    clip.sampleRate = decoded.sampleRate;
+    clip.audio = toJuce(decoded);
+    musicClips_.push_back(std::move(clip));
+    return true;
+}
+
+void ProcessingEngine::setMusicClipParams(int index, double startSeconds, double gainDb,
+                                          double fadeInSeconds, double fadeOutSeconds,
+                                          double lengthSeconds) {
+    if (index < 0 || index >= static_cast<int>(musicClips_.size()))
+        return;
+    auto& clip = musicClips_[static_cast<std::size_t>(index)];
+    clip.startSeconds = std::max(0.0, startSeconds);
+    clip.gainDb = std::clamp(gainDb, -60.0, 6.0);
+    clip.fadeInSeconds = std::max(0.0, fadeInSeconds);
+    clip.fadeOutSeconds = std::max(0.0, fadeOutSeconds);
+    clip.lengthSeconds = lengthSeconds <= 0.0
+        ? clip.sourceDurationSeconds()
+        : std::clamp(lengthSeconds, 0.1, clip.sourceDurationSeconds());
+}
+
+void ProcessingEngine::removeMusicClip(int index) {
+    if (index < 0 || index >= static_cast<int>(musicClips_.size()))
+        return;
+    musicClips_.erase(musicClips_.begin() + index);
 }
 
 double ProcessingEngine::measureChainLoudness(const vc::ChainParams& params) const {
@@ -214,6 +309,7 @@ void ProcessingEngine::process(const vc::ChainParams& params) {
     vc::VoiceChain chain;
     chain.prepare(processed_.sampleRate, processed_.numChannels(), params);
     chain.process(processed_);
+    mixMusicInto(processed_, musicClips_);
 
     lastInputLufs_ = chain.measuredInputLufs();
     lastGainDb_ = chain.appliedLoudnessGainDb();

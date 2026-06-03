@@ -49,6 +49,7 @@ if(VC_BUILD_APP)
         desktop-juce/Main.cpp
         desktop-juce/MainComponent.cpp
         desktop-juce/FileDropComponent.cpp
+        desktop-juce/MusicTimeline.cpp
         desktop-juce/PreviewPlayer.cpp
         desktop-juce/ProcessingEngine.cpp
         desktop-juce/SpectrumView.cpp)

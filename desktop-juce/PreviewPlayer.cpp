@@ -14,6 +14,11 @@ void PreviewPlayer::setDenoisedSource(const juce::AudioBuffer<float>* denoised) 
     denoised_ = denoised;
 }
 
+void PreviewPlayer::setMusicClips(const std::vector<MusicClip>& clips) {
+    const juce::ScopedLock sl(lock_);
+    musicClips_ = clips;
+}
+
 void PreviewPlayer::setNoiseReductionAmount(double amount) {
     noiseReductionAmount_.store(static_cast<float>(juce::jlimit(0.0, 1.0, amount)),
                                 std::memory_order_relaxed);
@@ -24,6 +29,7 @@ void PreviewPlayer::clearSources() {
     const juce::ScopedLock sl(lock_);
     before_ = nullptr;
     denoised_ = nullptr;
+    musicClips_.clear();
     readPos_ = 0.0;
     rmsLin_ = 0.0;
     rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
@@ -55,6 +61,50 @@ void PreviewPlayer::prepareToPlay(int samplesPerBlock, double deviceSampleRate) 
     chain_.prepare(static_cast<int>(deviceRate_), 2);
 }
 
+void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample, int numSamples,
+                                 double timelineStartSeconds) {
+    const int outChannels = dest.getNumChannels();
+    if (outChannels <= 0 || numSamples <= 0)
+        return;
+
+    for (const auto& clip : musicClips_) {
+        if (clip.audio.getNumSamples() <= 1 || clip.sampleRate <= 0.0)
+            continue;
+
+        const double clipStart = clip.startSeconds;
+        const double clipEnd = clipStart + clip.durationSeconds();
+        const double blockStart = timelineStartSeconds;
+        const double blockEnd = timelineStartSeconds + static_cast<double>(numSamples) / deviceRate_;
+        if (clipEnd <= blockStart || clipStart >= blockEnd)
+            continue;
+
+        const float gain = static_cast<float>(std::pow(10.0, clip.gainDb / 20.0));
+        for (int i = 0; i < numSamples; ++i) {
+            const double timeline = timelineStartSeconds + static_cast<double>(i) / deviceRate_;
+            const double clipTime = timeline - clipStart;
+            if (clipTime < 0.0 || clipTime >= clip.durationSeconds())
+                continue;
+
+            double fade = 1.0;
+            if (clip.fadeInSeconds > 0.0)
+                fade = std::min(fade, clipTime / clip.fadeInSeconds);
+            if (clip.fadeOutSeconds > 0.0)
+                fade = std::min(fade, (clip.durationSeconds() - clipTime) / clip.fadeOutSeconds);
+            fade = juce::jlimit(0.0, 1.0, fade);
+
+            const double srcPos = clipTime * clip.sampleRate;
+            const int i0 = static_cast<int>(juce::jlimit(0.0, static_cast<double>(clip.audio.getNumSamples() - 2), srcPos));
+            const float frac = static_cast<float>(srcPos - i0);
+            for (int ch = 0; ch < outChannels; ++ch) {
+                const int sc = juce::jmin(ch, clip.audio.getNumChannels() - 1);
+                const float* src = clip.audio.getReadPointer(sc);
+                const float sample = src[i0] + frac * (src[i0 + 1] - src[i0]);
+                dest.addSample(ch, startSample + i, sample * gain * static_cast<float>(fade));
+            }
+        }
+    }
+}
+
 void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) {
     info.clearActiveBufferRegion();
 
@@ -74,6 +124,7 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
 
     // 1. Render the dry signal (resampled) into the output region.
     double pos = readPos_;
+    const double timelineStartSeconds = readPos_ / sourceRate_;
     int produced = 0;
     for (int i = 0; i < n; ++i) {
         if (pos >= srcLen - 1) {
@@ -131,6 +182,8 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
         for (int ch = 0; ch < procCh; ++ch)
             info.buffer->copyFrom(ch, info.startSample, scratch_, ch, 0, produced);
     }
+
+    mixMusicInto(*info.buffer, info.startSample, produced, timelineStartSeconds);
 
     // 4. Capture the heard output (mono mix) for the live spectrum analyzer.
     int w = analysisWrite_.load(std::memory_order_relaxed);

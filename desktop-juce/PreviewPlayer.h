@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "LiveVoiceChain.h"
+#include "MusicClip.h"
 #include "Presets.h"
 
 #include <atomic>
@@ -16,6 +17,7 @@ class PreviewPlayer : public juce::AudioSource {
 public:
     void setDrySource(const juce::AudioBuffer<float>* before, double sourceRate);
     void setDenoisedSource(const juce::AudioBuffer<float>* denoised);
+    void setMusicClips(const std::vector<MusicClip>& clips);
     void clearSources();
 
     void setParams(const vc::ChainParams& params) { chain_.setParams(params); }
@@ -52,6 +54,7 @@ private:
     juce::CriticalSection lock_;
     const juce::AudioBuffer<float>* before_ = nullptr;
     const juce::AudioBuffer<float>* denoised_ = nullptr;
+    std::vector<MusicClip> musicClips_;
 
     vc::LiveVoiceChain chain_;
     juce::AudioBuffer<float> scratch_; // wet render scratch, preallocated
@@ -66,6 +69,9 @@ private:
     int blockSize_ = 512;
     double readPos_ = 0.0; // source samples; audio thread only
     double rmsLin_ = 0.0;  // audio thread only
+
+    void mixMusicInto(juce::AudioBuffer<float>& dest, int startSample, int numSamples,
+                      double timelineStartSeconds);
 
     // Analysis ring for the live spectrum (single producer = audio thread).
     std::vector<float> analysisRing_ = std::vector<float>(kAnalysisSize, 0.0f);

@@ -5,6 +5,7 @@
 
 #include "FileDropComponent.h"
 #include "GrMeter.h"
+#include "MusicTimeline.h"
 #include "PreviewPlayer.h"
 #include "ProcessingEngine.h"
 #include "Presets.h" // vc::Preset, vc::Tone, vc::ChainParams
@@ -33,6 +34,12 @@ private:
     void applyParamsLive();
     void recomputeLoudnessAsync();
     void doExport();
+    void addMusicClip(double startSeconds = 0.0);
+    void removeSelectedMusicClip();
+    void refreshMusicClipList();
+    void syncMusicControlsFromSelection();
+    void applySelectedMusicClipControls();
+    void updateMusicTimeline();
     void togglePlay();
     void updateListenButton();
     void updateEqView();
@@ -71,6 +78,12 @@ private:
     juce::TextButton resetProButton_ { "Reset" };
     juce::TextButton playButton_ { "Play" };
     juce::TextButton listenButton_; // toggles Original vs Enhanced output
+    juce::TextButton addMusicButton_ { "Add music..." };
+    juce::TextButton removeMusicButton_ { "Remove" };
+    juce::ComboBox musicClipBox_;
+    juce::Label musicCaption_, musicStartLabel_, musicVolumeLabel_, musicFadeInLabel_, musicFadeOutLabel_;
+    juce::Slider musicStartSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
+    MusicTimeline musicTimeline_;
     juce::TextButton exportButton_ { "Export video..." };
     juce::Label statusLabel_;
 
@@ -88,6 +101,7 @@ private:
     std::thread worker_;
     std::atomic<bool> busy_ { false };
     std::unique_ptr<juce::FileChooser> exportChooser_;
+    std::unique_ptr<juce::FileChooser> musicChooser_;
 
     // Live spectrum FFT (message-thread side; fed by PreviewPlayer's ring).
     static constexpr int kFftOrder = 11; // 2048-point

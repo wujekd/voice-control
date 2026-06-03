@@ -4,6 +4,7 @@
 
 #include "AudioBuffer.h"        // vc::AudioBuffer
 #include "Eq.h"                 // vc::EqBand
+#include "MusicClip.h"
 #include "Presets.h"            // vc::Preset, vc::Tone, vc::ChainParams
 #include "SpectrumAnalyzer.h"   // vc::SpectrumResult
 
@@ -27,6 +28,13 @@ public:
     // (format inferred from the output extension). Slow (calls ffmpeg).
     bool exportTo(const juce::File& output, const vc::ChainParams& params,
                   juce::String& error);
+
+    bool addMusicClip(const juce::File& audioFile, juce::String& error);
+    void setMusicClipParams(int index, double startSeconds, double gainDb,
+                            double fadeInSeconds, double fadeOutSeconds,
+                            double lengthSeconds = 0.0);
+    void removeMusicClip(int index);
+    const std::vector<MusicClip>& musicClips() const { return musicClips_; }
 
     // Whole-file average spectrum and the auto-EQ curve derived from it,
     // computed once at load. Used by the chain and the GUI spectrum view.
@@ -63,6 +71,7 @@ private:
     static vc::AudioBuffer blendNoiseReduction(const vc::AudioBuffer& original,
                                                const vc::AudioBuffer& denoised,
                                                double amount);
+    static void mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips);
     bool buildDenoisedCache(const juce::File& inputWav, juce::String& error);
 
     vc::AudioBuffer original_;
@@ -75,6 +84,7 @@ private:
     bool processedReady_ = false;
     juce::File sourceFile_;
     bool sourceHasVideo_ = false;
+    std::vector<MusicClip> musicClips_;
     vc::SpectrumResult spectrum_;
     std::vector<vc::EqBand> autoEqBands_;
     double inputLufs_ = 0.0;

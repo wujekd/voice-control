@@ -126,6 +126,57 @@ MainComponent::MainComponent() {
     addAndMakeVisible(listenButton_);
     updateListenButton();
 
+    musicCaption_.setText("Backing Music", juce::dontSendNotification);
+    addAndMakeVisible(musicCaption_);
+
+    addMusicButton_.onClick = [this] { addMusicClip(0.0); };
+    addMusicButton_.setWantsKeyboardFocus(false);
+    addAndMakeVisible(addMusicButton_);
+
+    removeMusicButton_.onClick = [this] { removeSelectedMusicClip(); };
+    removeMusicButton_.setWantsKeyboardFocus(false);
+    addAndMakeVisible(removeMusicButton_);
+
+    musicClipBox_.onChange = [this] { syncMusicControlsFromSelection(); };
+    addAndMakeVisible(musicClipBox_);
+
+    musicStartLabel_.setText("Start", juce::dontSendNotification);
+    musicVolumeLabel_.setText("Volume", juce::dontSendNotification);
+    musicFadeInLabel_.setText("Fade in", juce::dontSendNotification);
+    musicFadeOutLabel_.setText("Fade out", juce::dontSendNotification);
+    for (auto* label : { &musicStartLabel_, &musicVolumeLabel_, &musicFadeInLabel_, &musicFadeOutLabel_ })
+        addAndMakeVisible(label);
+
+    auto configureMusicSlider = [this](juce::Slider& slider, double min, double max,
+                                       double step, double value, const juce::String& suffix) {
+        slider.setRange(min, max, step);
+        slider.setValue(value, juce::dontSendNotification);
+        slider.setTextValueSuffix(suffix);
+        slider.onValueChange = [this] { applySelectedMusicClipControls(); };
+        addAndMakeVisible(slider);
+    };
+    configureMusicSlider(musicStartSlider_, 0.0, 600.0, 0.1, 0.0, " s");
+    configureMusicSlider(musicVolumeSlider_, -60.0, 6.0, 0.5, -18.0, " dB");
+    configureMusicSlider(musicFadeInSlider_, 0.0, 20.0, 0.1, 1.0, " s");
+    configureMusicSlider(musicFadeOutSlider_, 0.0, 20.0, 0.1, 1.0, " s");
+
+    musicTimeline_.onAddAt = [this](double seconds) { addMusicClip(seconds); };
+    musicTimeline_.onSelectClip = [this](int index) {
+        musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
+    };
+    musicTimeline_.onMoveOrResizeClip = [this](int index, double start, double length) {
+        const auto& clips = engine_.musicClips();
+        if (index < 0 || index >= static_cast<int>(clips.size()))
+            return;
+        const auto& clip = clips[static_cast<std::size_t>(index)];
+        engine_.setMusicClipParams(index, start, clip.gainDb,
+                                   clip.fadeInSeconds, clip.fadeOutSeconds, length);
+        player_.setMusicClips(engine_.musicClips());
+        syncMusicControlsFromSelection();
+        updateMusicTimeline();
+    };
+    addAndMakeVisible(musicTimeline_);
+
     exportButton_.onClick = [this] { doExport(); };
     exportButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(exportButton_);
@@ -145,6 +196,11 @@ MainComponent::MainComponent() {
 
     playButton_.setEnabled(false);
     listenButton_.setEnabled(false);
+    addMusicButton_.setEnabled(false);
+    removeMusicButton_.setEnabled(false);
+    musicClipBox_.setEnabled(false);
+    for (auto* s : { &musicStartSlider_, &musicVolumeSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
+        s->setEnabled(false);
     exportButton_.setEnabled(false);
     noiseReductionSlider_.setEnabled(false);
 
@@ -166,7 +222,7 @@ MainComponent::MainComponent() {
     deviceManager_.addAudioCallback(&sourcePlayer_);
 
     startTimerHz(30);
-    setSize(600, 830);
+    setSize(920, 980);
     grabKeyboardFocus();
 }
 
@@ -214,6 +270,59 @@ vc::ChainParams MainComponent::buildParams() const {
         p.autoEqBands = vc::computeAutoEqBands(engine_.spectrum(), p.baseAutoEqStrength);
 
     return p;
+}
+
+void MainComponent::refreshMusicClipList() {
+    const int previous = musicClipBox_.getSelectedId();
+    musicClipBox_.clear(juce::dontSendNotification);
+    const auto& clips = engine_.musicClips();
+    for (int i = 0; i < static_cast<int>(clips.size()); ++i)
+        musicClipBox_.addItem(juce::String(i + 1) + ". " + clips[static_cast<std::size_t>(i)].name, i + 1);
+
+    if (!clips.empty())
+        musicClipBox_.setSelectedId(juce::jlimit(1, static_cast<int>(clips.size()), previous > 0 ? previous : 1),
+                                    juce::dontSendNotification);
+    syncMusicControlsFromSelection();
+    player_.setMusicClips(clips);
+    updateMusicTimeline();
+}
+
+void MainComponent::syncMusicControlsFromSelection() {
+    const int index = musicClipBox_.getSelectedId() - 1;
+    const auto& clips = engine_.musicClips();
+    const bool valid = index >= 0 && index < static_cast<int>(clips.size());
+    removeMusicButton_.setEnabled(!busy_.load() && valid);
+    musicClipBox_.setEnabled(!busy_.load() && !clips.empty());
+    for (auto* s : { &musicStartSlider_, &musicVolumeSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
+        s->setEnabled(!busy_.load() && valid);
+
+    if (!valid)
+        return;
+
+    const auto& clip = clips[static_cast<std::size_t>(index)];
+    musicStartSlider_.setValue(clip.startSeconds, juce::dontSendNotification);
+    musicVolumeSlider_.setValue(clip.gainDb, juce::dontSendNotification);
+    musicFadeInSlider_.setValue(clip.fadeInSeconds, juce::dontSendNotification);
+    musicFadeOutSlider_.setValue(clip.fadeOutSeconds, juce::dontSendNotification);
+}
+
+void MainComponent::applySelectedMusicClipControls() {
+    const int index = musicClipBox_.getSelectedId() - 1;
+    engine_.setMusicClipParams(index,
+                               musicStartSlider_.getValue(),
+                               musicVolumeSlider_.getValue(),
+                               musicFadeInSlider_.getValue(),
+                               musicFadeOutSlider_.getValue(),
+                               index >= 0 && index < static_cast<int>(engine_.musicClips().size())
+                                   ? engine_.musicClips()[static_cast<std::size_t>(index)].durationSeconds()
+                                   : 0.0);
+    player_.setMusicClips(engine_.musicClips());
+    updateMusicTimeline();
+}
+
+void MainComponent::updateMusicTimeline() {
+    musicTimeline_.setVoice(engine_.hasAudio() ? &engine_.beforeBuffer() : nullptr, engine_.sampleRate());
+    musicTimeline_.setClips(&engine_.musicClips(), musicClipBox_.getSelectedId() - 1);
 }
 
 void MainComponent::resetProDefaults() {
@@ -347,6 +456,8 @@ void MainComponent::loadFile(const juce::File& file) {
             listenButton_.setToggleState(true, juce::dontSendNotification);
             updateListenButton();
             exportButton_.setEnabled(true);
+            addMusicButton_.setEnabled(true);
+            refreshMusicClipList();
             exportButton_.setButtonText(engine_.sourceHasVideo() ? "Export video..."
                                                                  : "Export audio...");
             dropArea_.setStatus(file.getFileName());
@@ -359,6 +470,52 @@ void MainComponent::loadFile(const juce::File& file) {
                 "Loaded \"%s\"  -  %s, input %.1f LUFS, target %.0f LUFS.",
                 file.getFileName().toRawUTF8(), denoise, engine_.inputLufs(), target));
         });
+}
+
+void MainComponent::addMusicClip(double startSeconds) {
+    if (!engine_.hasAudio()) return;
+
+    musicChooser_ = std::make_unique<juce::FileChooser>(
+        "Add backing music", juce::File(), "*.wav;*.mp3;*.m4a;*.flac;*.aiff");
+    musicChooser_->launchAsync(
+        juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+        [this, startSeconds](const juce::FileChooser& fc) {
+            const auto file = fc.getResult();
+            if (file == juce::File()) return;
+
+            runOnWorker(
+                "Adding backing music...",
+                [this, file]() -> juce::String {
+                    juce::String err;
+                    if (!engine_.addMusicClip(file, err))
+                        return err.isEmpty() ? "could not add music" : err;
+                    return {};
+                },
+                [this, startSeconds]() {
+                    const int index = static_cast<int>(engine_.musicClips().size()) - 1;
+                    if (index >= 0) {
+                        const auto& clip = engine_.musicClips()[static_cast<std::size_t>(index)];
+                        const double projectDuration = engine_.sampleRate() > 0.0
+                            ? static_cast<double>(engine_.beforeBuffer().getNumSamples()) / engine_.sampleRate()
+                            : clip.sourceDurationSeconds();
+                        const double maxLength = std::max(0.1, projectDuration - startSeconds);
+                        engine_.setMusicClipParams(index, startSeconds, clip.gainDb,
+                                                   clip.fadeInSeconds, clip.fadeOutSeconds,
+                                                   std::min(clip.sourceDurationSeconds(), maxLength));
+                    }
+                    refreshMusicClipList();
+                    if (index >= 0)
+                        musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
+                    setUiBusy(false, "Backing music added.");
+                });
+        });
+}
+
+void MainComponent::removeSelectedMusicClip() {
+    const int index = musicClipBox_.getSelectedId() - 1;
+    engine_.removeMusicClip(index);
+    refreshMusicClipList();
+    updateMusicTimeline();
 }
 
 void MainComponent::doExport() {
@@ -433,7 +590,9 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
     proButton_.setEnabled(!busy);
     playButton_.setEnabled(!busy && haveAudio);
     listenButton_.setEnabled(!busy && haveAudio);
+    addMusicButton_.setEnabled(!busy && haveAudio);
     exportButton_.setEnabled(!busy && haveAudio);
+    syncMusicControlsFromSelection();
 
     statusLabel_.setText(message, juce::dontSendNotification);
 }
@@ -458,6 +617,12 @@ void MainComponent::timerCallback() {
         updateLiveSpectrum();
     else
         spectrumView_.setShowLive(false);
+
+    const double playheadSeconds = engine_.sampleRate() > 0.0
+        ? player_.getPositionNormalised()
+            * static_cast<double>(engine_.beforeBuffer().getNumSamples()) / engine_.sampleRate()
+        : 0.0;
+    musicTimeline_.setPlayheadSeconds(playheadSeconds);
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -475,6 +640,9 @@ void MainComponent::resized() {
 
     spectrumView_.setBounds(r.removeFromTop(150));
     r.removeFromTop(6);
+
+    musicTimeline_.setBounds(r.removeFromTop(150));
+    r.removeFromTop(8);
 
     autoEqButton_.setBounds(r.removeFromTop(24));
     r.removeFromTop(6);
@@ -525,6 +693,25 @@ void MainComponent::resized() {
     playButton_.setBounds(transport.removeFromLeft(90).reduced(2));
     listenButton_.setBounds(transport.reduced(2));
     r.removeFromTop(10);
+
+    auto musicArea = r.removeFromTop(126);
+    musicCaption_.setBounds(musicArea.removeFromTop(20));
+    auto musicTop = musicArea.removeFromTop(30);
+    addMusicButton_.setBounds(musicTop.removeFromLeft(116).reduced(2));
+    removeMusicButton_.setBounds(musicTop.removeFromRight(86).reduced(2));
+    musicClipBox_.setBounds(musicTop.reduced(2));
+    musicArea.removeFromTop(4);
+    auto musicRow1 = musicArea.removeFromTop(30);
+    musicStartLabel_.setBounds(musicRow1.removeFromLeft(54));
+    musicStartSlider_.setBounds(musicRow1.removeFromLeft(musicRow1.getWidth() / 2));
+    musicVolumeLabel_.setBounds(musicRow1.removeFromLeft(62));
+    musicVolumeSlider_.setBounds(musicRow1);
+    auto musicRow2 = musicArea.removeFromTop(30);
+    musicFadeInLabel_.setBounds(musicRow2.removeFromLeft(54));
+    musicFadeInSlider_.setBounds(musicRow2.removeFromLeft(musicRow2.getWidth() / 2));
+    musicFadeOutLabel_.setBounds(musicRow2.removeFromLeft(62));
+    musicFadeOutSlider_.setBounds(musicRow2);
+    r.removeFromTop(8);
 
     // Live gain-reduction meters.
     fastCompMeter_.setBounds(r.removeFromTop(20));
