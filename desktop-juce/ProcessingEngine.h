@@ -1,0 +1,73 @@
+#pragma once
+
+#include <juce_audio_utils/juce_audio_utils.h>
+
+#include "AudioBuffer.h"        // vc::AudioBuffer
+#include "Eq.h"                 // vc::EqBand
+#include "Presets.h"            // vc::Preset, vc::Tone, vc::ChainParams
+#include "SpectrumAnalyzer.h"   // vc::SpectrumResult
+
+#include <vector>
+
+// Glue between the JUCE UI and the portable engine. Owns the decoded audio,
+// runs the VoiceChain, and drives FFmpeg for extract/export. Knows nothing
+// about widgets — the UI calls these methods (off the message thread for the
+// slow ones). All the DSP lives in vc_core; this class never reimplements it.
+class ProcessingEngine {
+public:
+    // Decodes a video OR audio file's audio to the "before" buffer (via a temp
+    // WAV). Returns false and fills `error` on failure. Slow (calls ffmpeg).
+    bool loadMedia(const juce::File& media, juce::String& error);
+
+    // Runs the chain for the given params, producing the "after" buffer.
+    void process(const vc::ChainParams& params);
+
+    // Re-runs the chain and writes the result. For a video source it muxes the
+    // audio back into the video; for an audio source it writes an audio file
+    // (format inferred from the output extension). Slow (calls ffmpeg).
+    bool exportTo(const juce::File& output, const vc::ChainParams& params,
+                  juce::String& error);
+
+    // Whole-file average spectrum and the auto-EQ curve derived from it,
+    // computed once at load. Used by the chain and the GUI spectrum view.
+    const vc::SpectrumResult& spectrum() const { return spectrum_; }
+    const std::vector<vc::EqBand>& autoEqBands() const { return autoEqBands_; }
+
+    bool hasAudio() const { return original_.numFrames() > 0; }
+    bool hasProcessed() const { return processedReady_; }
+    const juce::AudioBuffer<float>& beforeBuffer() const { return beforeJuce_; }
+    const juce::AudioBuffer<float>& afterBuffer() const { return afterJuce_; }
+    double sampleRate() const { return static_cast<double>(original_.sampleRate); }
+
+    // Integrated loudness of the (unprocessed) input, measured once at load.
+    // May be -inf for silence.
+    double inputLufs() const { return inputLufs_; }
+
+    // Integrated loudness of the signal *reaching* the loudness stage, i.e.
+    // after HPF -> EQ -> compressor -> de-esser for the given params (loudness
+    // and limiter disabled). The live chain uses `target - this` as its gain so
+    // the preview hits the loudness target despite the compression. Runs an
+    // offline pass on a copy of the input; call off the audio thread.
+    double measureChainLoudness(const vc::ChainParams& params) const;
+    juce::File sourceFile() const { return sourceFile_; }
+    bool sourceHasVideo() const { return sourceHasVideo_; }
+
+    double lastInputLufs() const { return lastInputLufs_; }
+    double lastGainDb() const { return lastGainDb_; }
+
+private:
+    static juce::AudioBuffer<float> toJuce(const vc::AudioBuffer& src);
+
+    vc::AudioBuffer original_;
+    vc::AudioBuffer processed_;
+    juce::AudioBuffer<float> beforeJuce_;
+    juce::AudioBuffer<float> afterJuce_;
+    bool processedReady_ = false;
+    juce::File sourceFile_;
+    bool sourceHasVideo_ = false;
+    vc::SpectrumResult spectrum_;
+    std::vector<vc::EqBand> autoEqBands_;
+    double inputLufs_ = 0.0;
+    double lastInputLufs_ = 0.0;
+    double lastGainDb_ = 0.0;
+};

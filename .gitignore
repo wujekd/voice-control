@@ -1,0 +1,9 @@
+build/
+.claude/
+node_modules/
+third_party/JUCE/
+
+*.md
+*.MD
+
+.DS_Store
