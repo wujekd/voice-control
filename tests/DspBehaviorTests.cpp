@@ -91,6 +91,16 @@ int main() {
     vc::applyIntensity(lowParams, 0.0);
     vc::applyIntensity(highParams, 1.0);
 
+    ok &= expect(std::fabs(lowParams.deEssRangeDb - highParams.deEssRangeDb) < 1e-9,
+                 "intensity should not change de-esser range");
+    ok &= expect(lowParams.baseAutoEqStrength > 0.0,
+                 "minimum intensity should still apply corrective EQ");
+    ok &= expect(std::fabs(vc::noiseReductionControlToBlend(0.5) - 0.6) < 0.02,
+                 "noise reduction control should reach the useful range earlier");
+    ok &= expect(vc::noiseReductionControlToBlend(0.0) == 0.0
+                 && vc::noiseReductionControlToBlend(1.0) == 1.0,
+                 "noise reduction control should preserve its endpoints");
+
     vc::VoiceChain lowChain;
     lowChain.prepare(lowIntensity.sampleRate, lowIntensity.numChannels(), lowParams);
     lowChain.process(lowIntensity);

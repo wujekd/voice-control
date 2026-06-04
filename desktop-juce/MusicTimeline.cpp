@@ -158,10 +158,12 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
     const int pixelColumns = std::max(1, static_cast<int>(wave.getWidth()));
     const int peakColumns = static_cast<int>(clip.waveformPeaks.size());
     const double sourceDuration = std::max(0.001, clip.sourceDurationSeconds());
+    const double offsetFraction = juce::jlimit(0.0, 1.0, clip.sourceOffsetSeconds / sourceDuration);
     const double visibleFraction = juce::jlimit(0.0, 1.0, clip.durationSeconds() / sourceDuration);
     for (int x = 0; x < pixelColumns; ++x) {
         const double visiblePos = static_cast<double>(x) / static_cast<double>(pixelColumns);
-        const int col = static_cast<int>(visiblePos * visibleFraction * static_cast<double>(peakColumns));
+        const int col = static_cast<int>((offsetFraction + visiblePos * visibleFraction)
+                                         * static_cast<double>(peakColumns));
         if (col >= columns)
             break;
         const float peak = clip.waveformPeaks[static_cast<std::size_t>(col)];
@@ -264,6 +266,7 @@ void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
         const auto b = clipBounds(hit);
         const auto& clip = (*clips_)[static_cast<std::size_t>(hit)];
         dragStartSeconds_ = clip.startSeconds;
+        dragSourceOffsetSeconds_ = clip.sourceOffsetSeconds;
         dragLengthSeconds_ = clip.durationSeconds();
         dragMouseSeconds_ = xToSeconds(p.x);
         if (p.x < b.getX() + 8.0f)
@@ -309,22 +312,31 @@ void MusicTimeline::mouseDrag(const juce::MouseEvent& e) {
     const double sourceLength = std::max(0.1, clip.sourceDurationSeconds());
     const double timelineLength = timelineDurationSeconds();
     double start = dragStartSeconds_;
+    double sourceOffset = clip.sourceOffsetSeconds;
     double length = dragLengthSeconds_;
 
     if (dragMode_ == DragMode::Move) {
         start = juce::jlimit(0.0, std::max(0.0, timelineLength - length), dragStartSeconds_ + delta);
+        sourceOffset = dragSourceOffsetSeconds_;
     } else if (dragMode_ == DragMode::ResizeRight) {
-        length = juce::jlimit(0.1, std::min(sourceLength, timelineLength - start),
+        sourceOffset = dragSourceOffsetSeconds_;
+        length = juce::jlimit(0.1, std::min(sourceLength - sourceOffset, timelineLength - start),
                               dragLengthSeconds_ + delta);
     } else if (dragMode_ == DragMode::ResizeLeft) {
-        const double newStart = std::max(0.0, dragStartSeconds_ + delta);
+        const double minDelta = std::max(-dragStartSeconds_, -dragSourceOffsetSeconds_);
+        const double maxDelta = dragLengthSeconds_ - 0.1;
+        const double trimDelta = juce::jlimit(minDelta, maxDelta, delta);
+        const double newStart = dragStartSeconds_ + trimDelta;
         const double end = dragStartSeconds_ + dragLengthSeconds_;
         start = std::min(newStart, end - 0.1);
-        length = juce::jlimit(0.1, std::min(sourceLength, timelineLength - start), end - start);
+        sourceOffset = juce::jlimit(0.0, sourceLength - 0.1,
+                                    dragSourceOffsetSeconds_ + trimDelta);
+        length = juce::jlimit(0.1, std::min(sourceLength - sourceOffset, timelineLength - start),
+                              end - start);
     }
 
     if (onMoveOrResizeClip)
-        onMoveOrResizeClip(draggingIndex_, start, length);
+        onMoveOrResizeClip(draggingIndex_, start, sourceOffset, length);
 }
 
 void MusicTimeline::mouseUp(const juce::MouseEvent&) {

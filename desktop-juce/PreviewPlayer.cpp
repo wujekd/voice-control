@@ -2,6 +2,13 @@
 
 #include <cmath>
 
+PreviewPlayer::PreviewPlayer() {
+    for (int i = 0; i < kMaxLiveMusicClips; ++i) {
+        musicGainDb_[static_cast<std::size_t>(i)].store(-18.0f, std::memory_order_relaxed);
+        musicSmoothedGain_[static_cast<std::size_t>(i)] = static_cast<float>(std::pow(10.0, -18.0 / 20.0));
+    }
+}
+
 void PreviewPlayer::setDrySource(const juce::AudioBuffer<float>* before, double sourceRate) {
     const juce::ScopedLock sl(lock_);
     before_ = before;
@@ -22,6 +29,20 @@ void PreviewPlayer::setDenoisedSource(const vc::AudioBuffer* denoised,
 void PreviewPlayer::setMusicClips(const std::vector<MusicClip>& clips) {
     const juce::ScopedLock sl(lock_);
     musicClips_ = clips;
+    const int count = juce::jmin(static_cast<int>(clips.size()), kMaxLiveMusicClips);
+    for (int i = 0; i < count; ++i) {
+        const float gainDb = static_cast<float>(clips[static_cast<std::size_t>(i)].gainDb);
+        musicGainDb_[static_cast<std::size_t>(i)].store(gainDb, std::memory_order_relaxed);
+        musicSmoothedGain_[static_cast<std::size_t>(i)] = static_cast<float>(std::pow(10.0, gainDb / 20.0f));
+    }
+}
+
+void PreviewPlayer::setMusicClipGainDb(int index, double gainDb) {
+    if (index < 0 || index >= kMaxLiveMusicClips)
+        return;
+    musicGainDb_[static_cast<std::size_t>(index)].store(
+        static_cast<float>(juce::jlimit(-60.0, 6.0, gainDb)),
+        std::memory_order_relaxed);
 }
 
 void PreviewPlayer::setNoiseReductionAmount(double amount) {
@@ -96,8 +117,19 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
         if (clipEnd <= blockStart || clipStart >= blockEnd)
             continue;
 
-        const float gain = static_cast<float>(std::pow(10.0, clip.gainDb / 20.0));
+        const bool hasLiveGain = clipIndex < kMaxLiveMusicClips;
+        const float targetGain = hasLiveGain
+            ? static_cast<float>(std::pow(
+                  10.0, musicGainDb_[static_cast<std::size_t>(clipIndex)].load(std::memory_order_relaxed) / 20.0f))
+            : static_cast<float>(std::pow(10.0, clip.gainDb / 20.0));
+        float gain = hasLiveGain
+            ? musicSmoothedGain_[static_cast<std::size_t>(clipIndex)]
+            : targetGain;
+        const float gainStep = static_cast<float>(1.0 - std::exp(-1.0 / (deviceRate_ * 0.015)));
         for (int i = 0; i < numSamples; ++i) {
+            if (hasLiveGain)
+                gain += (targetGain - gain) * gainStep;
+
             const double timeline = timelineStartSeconds + static_cast<double>(i) / deviceRate_;
             const double clipTime = timeline - clipStart;
             if (clipTime < 0.0 || clipTime >= clip.durationSeconds())
@@ -110,7 +142,7 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
                 fade = std::min(fade, (clip.durationSeconds() - clipTime) / clip.fadeOutSeconds);
             fade = juce::jlimit(0.0, 1.0, fade);
 
-            const double srcPos = clipTime * clip.sampleRate;
+            const double srcPos = (clip.sourceOffsetSeconds + clipTime) * clip.sampleRate;
             const int i0 = static_cast<int>(juce::jlimit(0.0, static_cast<double>(clip.audio.getNumSamples() - 2), srcPos));
             const float frac = static_cast<float>(srcPos - i0);
             for (int ch = 0; ch < outChannels; ++ch) {
@@ -120,6 +152,8 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
                 dest.addSample(ch, startSample + i, sample * gain * static_cast<float>(fade));
             }
         }
+        if (hasLiveGain)
+            musicSmoothedGain_[static_cast<std::size_t>(clipIndex)] = gain;
     }
 }
 

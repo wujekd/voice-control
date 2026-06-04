@@ -1,5 +1,49 @@
 #include "MainComponent.h"
 
+#include <cmath>
+
+void MainComponent::EncoderLookAndFeel::drawRotarySlider(
+    juce::Graphics& g, int x, int y, int width, int height, float sliderPosProportional,
+    float rotaryStartAngle, float rotaryEndAngle, juce::Slider& slider) {
+    const auto bounds = juce::Rectangle<float>((float) x, (float) y, (float) width, (float) height)
+        .reduced(9.0f);
+    const auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 7.0f;
+    const auto centre = bounds.getCentre();
+    const auto angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+    const auto stroke = juce::PathStrokeType(6.0f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded);
+    const auto green = juce::Colour(0xff6ee07a);
+
+    juce::Path inactiveArc;
+    inactiveArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
+                              rotaryStartAngle, rotaryEndAngle, true);
+    g.setColour(green.withAlpha(slider.isEnabled() ? 0.24f : 0.12f));
+    g.strokePath(inactiveArc, stroke);
+
+    juce::Path activeArc;
+    activeArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
+                            rotaryStartAngle, angle, true);
+    g.setColour(green.withAlpha(slider.isEnabled() ? 0.95f : 0.38f));
+    g.strokePath(activeArc, stroke);
+
+    g.setColour(juce::Colour(0xff15181d));
+    g.fillEllipse(bounds.withSizeKeepingCentre(radius * 1.5f, radius * 1.5f));
+    g.setColour(juce::Colours::white.withAlpha(slider.isEnabled() ? 0.14f : 0.07f));
+    g.drawEllipse(bounds.withSizeKeepingCentre(radius * 1.5f, radius * 1.5f), 1.0f);
+
+    const auto markerRadius = 4.5f;
+    const auto markerDistance = radius;
+    const auto marker = juce::Point<float>(
+        centre.x + std::cos(angle - juce::MathConstants<float>::halfPi) * markerDistance,
+        centre.y + std::sin(angle - juce::MathConstants<float>::halfPi) * markerDistance);
+    g.setColour(juce::Colour(0xffeaffed));
+    g.fillEllipse(marker.x - markerRadius, marker.y - markerRadius,
+                  markerRadius * 2.0f, markerRadius * 2.0f);
+    g.setColour(green);
+    g.drawEllipse(marker.x - markerRadius, marker.y - markerRadius,
+                  markerRadius * 2.0f, markerRadius * 2.0f, 1.4f);
+}
+
 MainComponent::MainComponent() {
     setWantsKeyboardFocus(true);
 
@@ -57,10 +101,6 @@ MainComponent::MainComponent() {
 
     addAndMakeVisible(spectrumView_);
 
-    autoEqButton_.setToggleState(true, juce::dontSendNotification);
-    autoEqButton_.onClick = [this] { applyParamsLive(); updateEqView(); };
-    addAndMakeVisible(autoEqButton_);
-
     toneCaption_.setText("Tone", juce::dontSendNotification);
     noiseReductionCaption_.setText("Noise Reduction", juce::dontSendNotification);
     strengthCaption_.setText("Intensity", juce::dontSendNotification);
@@ -68,30 +108,45 @@ MainComponent::MainComponent() {
     addAndMakeVisible(noiseReductionCaption_);
     addAndMakeVisible(strengthCaption_);
 
-    toneBox_.addItem("Natural", 1);
-    toneBox_.addItem("Warm", 2);
-    toneBox_.addItem("Crisp", 3);
-    toneBox_.setSelectedId(1, juce::dontSendNotification);
-    toneBox_.onChange = [this] { applyParamsLive(); updateEqView(); };
-    addAndMakeVisible(toneBox_);
+    auto configureEncoder = [this](juce::Slider& slider) {
+        slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 82, 22);
+        slider.setLookAndFeel(&encoderLookAndFeel_);
+    };
+
+    toneSlider_.setRange(-1.0, 1.0, 0.01);
+    toneSlider_.setValue(0.0, juce::dontSendNotification);
+    toneSlider_.textFromValueFunction = [](double value) {
+        if (value < -0.08)
+            return juce::String("Warm");
+        if (value > 0.08)
+            return juce::String("Crisp");
+        return juce::String("Natural");
+    };
+    configureEncoder(toneSlider_);
+    toneSlider_.onValueChange = [this] { applyParamsLive(); updateEqView(); };
+    addAndMakeVisible(toneSlider_);
 
     noiseReductionSlider_.setRange(0.0, 100.0, 1.0);
     noiseReductionSlider_.setValue(75.0, juce::dontSendNotification);
     noiseReductionSlider_.setTextValueSuffix(" %");
+    configureEncoder(noiseReductionSlider_);
     noiseReductionSlider_.onValueChange = [this] { applyParamsLive(); };
     addAndMakeVisible(noiseReductionSlider_);
 
     strengthSlider_.setRange(0.0, 100.0, 1.0);
     strengthSlider_.setValue(100.0, juce::dontSendNotification);
     strengthSlider_.setTextValueSuffix(" %");
+    configureEncoder(strengthSlider_);
     strengthSlider_.onValueChange = [this] { applyParamsLive(); updateEqView(); };
     addAndMakeVisible(strengthSlider_);
 
-    auto configureProSlider = [this](juce::Slider& slider, double min, double max,
+    auto configureProSlider = [this, configureEncoder](juce::Slider& slider, double min, double max,
                                      double step, double value, const juce::String& suffix) {
         slider.setRange(min, max, step);
         slider.setValue(value, juce::dontSendNotification);
         slider.setTextValueSuffix(suffix);
+        configureEncoder(slider);
         slider.onValueChange = [this] { applyParamsLive(); };
         addChildComponent(slider);
     };
@@ -192,11 +247,12 @@ MainComponent::MainComponent() {
     for (auto* label : { &musicStartLabel_, &musicVolumeLabel_, &musicFadeInLabel_, &musicFadeOutLabel_ })
         addAndMakeVisible(label);
 
-    auto configureMusicSlider = [this](juce::Slider& slider, double min, double max,
+    auto configureMusicSlider = [this, configureEncoder](juce::Slider& slider, double min, double max,
                                        double step, double value, const juce::String& suffix) {
         slider.setRange(min, max, step);
         slider.setValue(value, juce::dontSendNotification);
         slider.setTextValueSuffix(suffix);
+        configureEncoder(slider);
         slider.onValueChange = [this] { applySelectedMusicClipControls(); };
         addAndMakeVisible(slider);
     };
@@ -204,6 +260,7 @@ MainComponent::MainComponent() {
     configureMusicSlider(musicVolumeSlider_, -60.0, 6.0, 0.5, -18.0, " dB");
     configureMusicSlider(musicFadeInSlider_, 0.0, 20.0, 0.1, 1.0, " s");
     configureMusicSlider(musicFadeOutSlider_, 0.0, 20.0, 0.1, 1.0, " s");
+    musicVolumeSlider_.onValueChange = [this] { applySelectedMusicClipVolume(); };
 
     musicTimeline_.onAddAt = [this](double seconds) { addMusicClip(seconds); };
     musicTimeline_.onSeek = [this](double seconds) {
@@ -222,12 +279,12 @@ MainComponent::MainComponent() {
             player_.setMutedMusicClipIndex(-1);
         }
     };
-    musicTimeline_.onMoveOrResizeClip = [this](int index, double start, double length) {
+    musicTimeline_.onMoveOrResizeClip = [this](int index, double start, double sourceOffset, double length) {
         const auto& clips = engine_.musicClips();
         if (index < 0 || index >= static_cast<int>(clips.size()))
             return;
         const auto& clip = clips[static_cast<std::size_t>(index)];
-        engine_.setMusicClipParams(index, start, clip.gainDb,
+        engine_.setMusicClipParams(index, start, sourceOffset, clip.gainDb,
                                    clip.fadeInSeconds, clip.fadeOutSeconds, length);
         if (!musicClipDragActive_)
             player_.setMusicClips(engine_.musicClips());
@@ -287,6 +344,14 @@ MainComponent::MainComponent() {
 }
 
 MainComponent::~MainComponent() {
+    for (auto* s : { &toneSlider_, &noiseReductionSlider_, &strengthSlider_,
+                     &fastThresholdSlider_, &fastRatioSlider_, &glueThresholdSlider_,
+                     &glueRatioSlider_, &targetPreChainSlider_, &deEssFreqSlider_,
+                     &deEssThresholdSlider_, &deEssPresenceSlider_, &deEssRatioSlider_,
+                     &deEssRangeSlider_, &musicStartSlider_, &musicVolumeSlider_,
+                     &musicFadeInSlider_, &musicFadeOutSlider_ })
+        s->setLookAndFeel(nullptr);
+
     stopTimer();
     deviceManager_.removeChangeListener(this);
     deviceManager_.removeAudioCallback(&sourcePlayer_);
@@ -294,22 +359,21 @@ MainComponent::~MainComponent() {
     player_.clearSources();
     if (worker_.joinable())
         worker_.join();
-    if (loudnessWorker_.joinable())
-        loudnessWorker_.join();
 }
 
-vc::Tone MainComponent::currentTone() const {
-    switch (toneBox_.getSelectedId()) {
-        case 2: return vc::Tone::Warm;
-        case 3: return vc::Tone::Crisp;
-        default: return vc::Tone::Natural;
-    }
+double MainComponent::currentToneAmount() const {
+    return juce::jlimit(-0.95, 0.95, toneSlider_.getValue());
+}
+
+double MainComponent::currentIntensity() const {
+    return juce::jlimit(0.0, 1.0, strengthSlider_.getValue() / 100.0);
 }
 
 vc::ChainParams MainComponent::buildParams() const {
     auto p = vc::fixedVoiceCleanupParams();
-    p.tone = currentTone();
-    p.noiseReductionAmount = noiseReductionSlider_.getValue() / 100.0;
+    p.tone = vc::Tone::Natural;
+    p.toneAmount = currentToneAmount();
+    p.noiseReductionAmount = vc::noiseReductionControlToBlend(noiseReductionSlider_.getValue() / 100.0);
 
     p.fastCompThresholdDb = fastThresholdSlider_.getValue();
     p.fastCompRatio = fastRatioSlider_.getValue();
@@ -322,11 +386,11 @@ vc::ChainParams MainComponent::buildParams() const {
     p.deEssRatio = deEssRatioSlider_.getValue();
     p.deEssRangeDb = deEssRangeSlider_.getValue();
 
-    vc::applyIntensity(p, strengthSlider_.getValue() / 100.0);
-    p.deEssRangeDb = deEssRangeSlider_.getValue() * (strengthSlider_.getValue() / 100.0);
+    const double intensity = currentIntensity();
+    vc::applyIntensity(p, intensity);
     p.inputCalibrationGainDb = vc::computeCalibrationGainDb(engine_.inputLufs(), p);
 
-    p.autoEqEnabled = autoEqButton_.getToggleState();
+    p.autoEqEnabled = true;
     if (engine_.hasAudio())
         p.autoEqBands = vc::computeAutoEqBands(engine_.spectrum(), p.baseAutoEqStrength);
 
@@ -371,6 +435,9 @@ void MainComponent::applySelectedMusicClipControls() {
     const int index = musicClipBox_.getSelectedId() - 1;
     engine_.setMusicClipParams(index,
                                musicStartSlider_.getValue(),
+                               index >= 0 && index < static_cast<int>(engine_.musicClips().size())
+                                   ? engine_.musicClips()[static_cast<std::size_t>(index)].sourceOffsetSeconds
+                                   : 0.0,
                                musicVolumeSlider_.getValue(),
                                musicFadeInSlider_.getValue(),
                                musicFadeOutSlider_.getValue(),
@@ -379,6 +446,19 @@ void MainComponent::applySelectedMusicClipControls() {
                                    : 0.0);
     player_.setMusicClips(engine_.musicClips());
     updateMusicTimeline();
+}
+
+void MainComponent::applySelectedMusicClipVolume() {
+    const int index = musicClipBox_.getSelectedId() - 1;
+    const auto& clips = engine_.musicClips();
+    if (index < 0 || index >= static_cast<int>(clips.size()))
+        return;
+
+    const auto& clip = clips[static_cast<std::size_t>(index)];
+    const double gainDb = musicVolumeSlider_.getValue();
+    engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, gainDb,
+                               clip.fadeInSeconds, clip.fadeOutSeconds, clip.durationSeconds());
+    player_.setMusicClipGainDb(index, gainDb);
 }
 
 void MainComponent::updateMusicTimeline() {
@@ -506,27 +586,15 @@ void MainComponent::updateLiveSpectrum() {
 void MainComponent::applyParamsLive() {
     if (!engine_.hasAudio()) return;
     const auto params = buildParams();
+    const double intensity = currentIntensity();
+    double loudnessRef = intensityMinLoudnessRef_
+        + (intensityMaxLoudnessRef_ - intensityMinLoudnessRef_) * intensity;
+    if (!std::isfinite(loudnessRef))
+        loudnessRef = intensityMaxLoudnessRef_;
+    if (std::isfinite(loudnessRef))
+        player_.setInputLoudness(loudnessRef);
     player_.setNoiseReductionAmount(params.noiseReductionAmount);
     player_.setParams(params);             // instant: sound changes now
-    loudnessCountdown_ = 4;                 // ~200ms debounce, then refine loudness
-}
-
-void MainComponent::recomputeLoudnessAsync() {
-    if (busy_.load()) { loudnessCountdown_ = 4; return; }   // defer during load/export
-    if (loudnessBusy_.exchange(true)) { loudnessCountdown_ = 4; return; }
-    if (loudnessWorker_.joinable())
-        loudnessWorker_.join();
-
-    const auto params = buildParams();
-    juce::Component::SafePointer<MainComponent> safe(this);
-    loudnessWorker_ = std::thread([this, safe, params]() mutable {
-        const double ref = engine_.measureChainLoudness(params);
-        juce::MessageManager::callAsync([safe, ref]() mutable {
-            if (safe == nullptr) return;
-            safe->player_.setInputLoudness(ref);
-            safe->loudnessBusy_.store(false);
-        });
-    });
 }
 
 void MainComponent::runOnWorker(const juce::String& busyMsg,
@@ -547,6 +615,8 @@ void MainComponent::runOnWorker(const juce::String& busyMsg,
             if (error.isEmpty()) {
                 if (onSuccess) onSuccess();
             } else {
+                safe->analyzingMedia_ = false;
+                safe->dropArea_.setStatus("Add voice audio or video\nDrag here, or click to browse");
                 safe->setUiBusy(false, "Error: " + error);
             }
         });
@@ -555,6 +625,8 @@ void MainComponent::runOnWorker(const juce::String& busyMsg,
 
 void MainComponent::loadFile(const juce::File& file) {
     player_.stop();
+    analyzingMedia_ = true;
+    dropArea_.setStatus("Analyzing " + file.getFileName() + "\nMeasuring level and voice profile");
     const auto params = buildParams();
 
     runOnWorker(
@@ -563,19 +635,25 @@ void MainComponent::loadFile(const juce::File& file) {
             juce::String err;
             if (!engine_.loadMedia(file, err))
                 return err.isEmpty() ? "could not read audio from file" : err;
-            auto measuredParams = params;
-            measuredParams.inputCalibrationGainDb =
-                vc::computeCalibrationGainDb(engine_.inputLufs(), measuredParams);
-            measuredParams.autoEqBands =
-                vc::computeAutoEqBands(engine_.spectrum(), measuredParams.baseAutoEqStrength);
-            initialLoudnessRef_ = engine_.measureChainLoudness(measuredParams);
+
+            auto makeMeasuredParams = [&](double intensity) {
+                auto measuredParams = params;
+                vc::applyIntensity(measuredParams, intensity);
+                measuredParams.inputCalibrationGainDb =
+                    vc::computeCalibrationGainDb(engine_.inputLufs(), measuredParams);
+                measuredParams.autoEqBands =
+                    vc::computeAutoEqBands(engine_.spectrum(), measuredParams.baseAutoEqStrength);
+                return measuredParams;
+            };
+
+            intensityMinLoudnessRef_ = engine_.measureChainLoudness(makeMeasuredParams(0.0));
+            intensityMaxLoudnessRef_ = engine_.measureChainLoudness(makeMeasuredParams(1.0));
             return {};
         },
         [this, file]() {
             player_.setDrySource(&engine_.beforeBuffer(), engine_.sampleRate());
             player_.setDenoisedSource(engine_.denoisedPlanar(), engine_.denoisedValidHops(),
                                       engine_.denoisedNumHops(), engine_.denoisedHopSize());
-            player_.setInputLoudness(initialLoudnessRef_);
             applyParamsLive();
 
             playButton_.setEnabled(true);
@@ -592,6 +670,7 @@ void MainComponent::loadFile(const juce::File& file) {
             updateEqView();
 
             const double target = buildParams().targetLufs;
+            analyzingMedia_ = false;
             setUiBusy(false, juce::String::formatted(
                 "Loaded \"%s\"  -  denoising in background, input %.1f LUFS, target %.0f LUFS.",
                 file.getFileName().toRawUTF8(), engine_.inputLufs(), target));
@@ -629,7 +708,7 @@ void MainComponent::addMusicClip(double startSeconds) {
                             const double maxLength = std::max(0.1, projectDuration - start);
                             length = std::min(clip.sourceDurationSeconds(), maxLength);
                         }
-                        engine_.setMusicClipParams(index, start, clip.gainDb,
+                        engine_.setMusicClipParams(index, start, 0.0, clip.gainDb,
                                                    clip.fadeInSeconds, clip.fadeOutSeconds,
                                                    length);
                     }
@@ -711,10 +790,10 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
     progressBar_.setVisible(busy);
     progress_ = busy ? -1.0 : 0.0; // negative -> indeterminate animation
 
-    dropArea_.setEnabled(!busy);
     const bool haveAudio = engine_.hasAudio();
-    toneBox_.setEnabled(!busy);
-    autoEqButton_.setEnabled(!busy);
+    dropArea_.setVisible(analyzingMedia_ || !haveAudio);
+    dropArea_.setEnabled(!busy && !haveAudio);
+    toneSlider_.setEnabled(!busy);
     noiseReductionSlider_.setEnabled(!busy && haveAudio);
     strengthSlider_.setEnabled(!busy);
     proButton_.setEnabled(!busy);
@@ -728,10 +807,6 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
 }
 
 void MainComponent::timerCallback() {
-    // Debounced loudness refinement after a param change.
-    if (loudnessCountdown_ > 0 && --loudnessCountdown_ == 0)
-        recomputeLoudnessAsync();
-
     const bool playing = player_.isPlaying();
     playButton_.setButtonText(playing ? "Stop" : "Play");
 
@@ -786,56 +861,62 @@ void MainComponent::resized() {
         r.removeFromTop(8);
     }
 
-    dropArea_.setBounds(r.removeFromTop(78));
-    r.removeFromTop(10);
+    auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider) {
+        label.setBounds(area.removeFromTop(20));
+        slider.setBounds(area);
+    };
+
+    auto encoderRow = r.removeFromTop(138);
+    constexpr int encoderWidth = 170;
+    constexpr int encoderGap = 58;
+    const int totalEncoderWidth = encoderWidth * 3 + encoderGap * 2;
+    auto centeredEncoders = encoderRow.withSizeKeepingCentre(
+        juce::jmin(totalEncoderWidth, encoderRow.getWidth()), encoderRow.getHeight());
+    auto noiseArea = centeredEncoders.removeFromLeft(encoderWidth);
+    centeredEncoders.removeFromLeft(encoderGap);
+    auto strengthArea = centeredEncoders.removeFromLeft(encoderWidth);
+    centeredEncoders.removeFromLeft(encoderGap);
+    auto toneArea = centeredEncoders.removeFromLeft(encoderWidth);
+    placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
+    placeEncoder(strengthArea, strengthCaption_, strengthSlider_);
+    placeEncoder(toneArea, toneCaption_, toneSlider_);
+    proButton_.setBounds(encoderRow.removeFromRight(58).removeFromTop(30).reduced(2));
+    r.removeFromTop(8);
 
     spectrumView_.setBounds(r.removeFromTop(150));
     r.removeFromTop(6);
 
-    musicTimeline_.setBounds(r.removeFromTop(150));
-    r.removeFromTop(8);
-
-    autoEqButton_.setBounds(r.removeFromTop(24));
-    r.removeFromTop(6);
-
-    auto toneRow = r.removeFromTop(54).reduced(4);
-    toneCaption_.setBounds(toneRow.removeFromTop(18));
-    toneBox_.setBounds(toneRow);
-    r.removeFromTop(8);
-
-    auto noiseRow = r.removeFromTop(44);
-    noiseReductionCaption_.setBounds(noiseRow.removeFromLeft(118));
-    noiseReductionSlider_.setBounds(noiseRow);
-    r.removeFromTop(8);
-
-    auto strengthRow = r.removeFromTop(44);
-    strengthCaption_.setBounds(strengthRow.removeFromLeft(70));
-    proButton_.setBounds(strengthRow.removeFromRight(58).reduced(4, 2));
-    strengthSlider_.setBounds(strengthRow);
+    auto timelineBounds = r.removeFromTop(150);
+    musicTimeline_.setBounds(timelineBounds);
+    auto voiceDropBounds = timelineBounds.reduced(10);
+    voiceDropBounds.setHeight(58);
+    dropArea_.setBounds(voiceDropBounds);
+    dropArea_.setVisible(analyzingMedia_ || !engine_.hasAudio());
+    dropArea_.toFront(false);
     r.removeFromTop(8);
 
     if (proPanelVisible_) {
-        auto proArea = r.removeFromTop(292);
+        auto proArea = r.removeFromTop(286);
         proPanel_.setBounds(proArea);
         proArea.reduce(10, 18);
 
-        auto placePro = [&proArea](juce::Label& label, juce::Slider& slider) {
-            auto row = proArea.removeFromTop(24);
-            label.setBounds(row.removeFromLeft(112));
-            slider.setBounds(row);
-            proArea.removeFromTop(3);
+        auto placePro = [&proArea](juce::Label& leftLabel, juce::Slider& leftSlider,
+                                   juce::Label& rightLabel, juce::Slider& rightSlider) {
+            auto row = proArea.removeFromTop(50);
+            auto left = row.removeFromLeft(row.getWidth() / 2).reduced(4, 0);
+            auto right = row.reduced(4, 0);
+            leftLabel.setBounds(left.removeFromLeft(118).reduced(0, 10));
+            leftSlider.setBounds(left);
+            rightLabel.setBounds(right.removeFromLeft(118).reduced(0, 10));
+            rightSlider.setBounds(right);
+            proArea.removeFromTop(4);
         };
-        placePro(fastThresholdLabel_, fastThresholdSlider_);
-        placePro(fastRatioLabel_, fastRatioSlider_);
-        placePro(glueThresholdLabel_, glueThresholdSlider_);
-        placePro(glueRatioLabel_, glueRatioSlider_);
-        placePro(targetPreChainLabel_, targetPreChainSlider_);
+        placePro(fastThresholdLabel_, fastThresholdSlider_, fastRatioLabel_, fastRatioSlider_);
+        placePro(glueThresholdLabel_, glueThresholdSlider_, glueRatioLabel_, glueRatioSlider_);
+        placePro(targetPreChainLabel_, targetPreChainSlider_, deEssFreqLabel_, deEssFreqSlider_);
         proArea.removeFromTop(4);
-        placePro(deEssFreqLabel_, deEssFreqSlider_);
-        placePro(deEssThresholdLabel_, deEssThresholdSlider_);
-        placePro(deEssPresenceLabel_, deEssPresenceSlider_);
-        placePro(deEssRatioLabel_, deEssRatioSlider_);
-        placePro(deEssRangeLabel_, deEssRangeSlider_);
+        placePro(deEssThresholdLabel_, deEssThresholdSlider_, deEssPresenceLabel_, deEssPresenceSlider_);
+        placePro(deEssRatioLabel_, deEssRatioSlider_, deEssRangeLabel_, deEssRangeSlider_);
         resetProButton_.setBounds(proArea.removeFromTop(28).removeFromRight(90));
         r.removeFromTop(8);
     }
@@ -852,16 +933,16 @@ void MainComponent::resized() {
     removeMusicButton_.setBounds(musicTop.removeFromRight(86).reduced(2));
     musicClipBox_.setBounds(musicTop.reduced(2));
     musicArea.removeFromTop(4);
-    auto musicRow1 = musicArea.removeFromTop(30);
-    musicStartLabel_.setBounds(musicRow1.removeFromLeft(54));
-    musicStartSlider_.setBounds(musicRow1.removeFromLeft(musicRow1.getWidth() / 2));
-    musicVolumeLabel_.setBounds(musicRow1.removeFromLeft(62));
-    musicVolumeSlider_.setBounds(musicRow1);
-    auto musicRow2 = musicArea.removeFromTop(30);
-    musicFadeInLabel_.setBounds(musicRow2.removeFromLeft(54));
-    musicFadeInSlider_.setBounds(musicRow2.removeFromLeft(musicRow2.getWidth() / 2));
-    musicFadeOutLabel_.setBounds(musicRow2.removeFromLeft(62));
-    musicFadeOutSlider_.setBounds(musicRow2);
+    auto musicControls = musicArea.removeFromTop(66);
+    auto musicCellWidth = musicControls.getWidth() / 4;
+    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+                 musicStartLabel_, musicStartSlider_);
+    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+                 musicVolumeLabel_, musicVolumeSlider_);
+    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+                 musicFadeInLabel_, musicFadeInSlider_);
+    placeEncoder(musicControls.reduced(4, 0),
+                 musicFadeOutLabel_, musicFadeOutSlider_);
     r.removeFromTop(8);
 
     // Live gain-reduction meters.

@@ -8,19 +8,32 @@ namespace vc {
 std::vector<EqBand> tonePresetBands(Tone tone) {
     switch (tone) {
         case Tone::Warm:
-            return {
-                { EqBand::Type::LowShelf,  180.0,  3.0,  0.7071 }, // body
-                { EqBand::Type::HighShelf, 7000.0, -2.0, 0.7071 }, // soften
-            };
+            return toneAmountBands(-1.0);
         case Tone::Crisp:
-            return {
-                { EqBand::Type::LowShelf,  220.0,  -1.5, 0.7071 }, // trim mud
-                { EqBand::Type::HighShelf, 6000.0, 4.0,  0.7071 }, // air
-            };
+            return toneAmountBands(1.0);
         case Tone::Natural:
         default:
             return {};
     }
+}
+
+std::vector<EqBand> toneAmountBands(double amount) {
+    amount = std::clamp(amount, -1.0, 1.0);
+    if (std::fabs(amount) < 0.001)
+        return {};
+
+    if (amount < 0.0) {
+        const double s = -amount;
+        return {
+            { EqBand::Type::LowShelf,  180.0,  3.0 * s,  0.7071 }, // body
+            { EqBand::Type::HighShelf, 7000.0, -2.0 * s, 0.7071 }, // soften
+        };
+    }
+
+    return {
+        { EqBand::Type::LowShelf,  220.0,  -1.5 * amount, 0.7071 }, // trim mud
+        { EqBand::Type::HighShelf, 6000.0,  4.0 * amount, 0.7071 }, // air
+    };
 }
 
 std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength) {

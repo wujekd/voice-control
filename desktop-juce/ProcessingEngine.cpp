@@ -82,7 +82,7 @@ void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<Mus
                 fade = std::min(fade, (clipDuration - clipTime) / clip.fadeOutSeconds);
             fade = std::clamp(fade, 0.0, 1.0);
 
-            const double srcPos = i * srcRatio;
+            const double srcPos = clip.sourceOffsetSeconds * clip.sampleRate + i * srcRatio;
             const int i0 = static_cast<int>(std::clamp(srcPos, 0.0, static_cast<double>(clipSamples - 2)));
             const float frac = static_cast<float>(srcPos - i0);
             for (int ch = 0; ch < destChannels; ++ch) {
@@ -166,19 +166,22 @@ bool ProcessingEngine::addMusicClip(const juce::File& audioFile, juce::String& e
     return true;
 }
 
-void ProcessingEngine::setMusicClipParams(int index, double startSeconds, double gainDb,
+void ProcessingEngine::setMusicClipParams(int index, double startSeconds, double sourceOffsetSeconds, double gainDb,
                                           double fadeInSeconds, double fadeOutSeconds,
                                           double lengthSeconds) {
     if (index < 0 || index >= static_cast<int>(musicClips_.size()))
         return;
     auto& clip = musicClips_[static_cast<std::size_t>(index)];
     clip.startSeconds = std::max(0.0, startSeconds);
+    const double sourceDuration = clip.sourceDurationSeconds();
+    clip.sourceOffsetSeconds = std::clamp(sourceOffsetSeconds, 0.0, std::max(0.0, sourceDuration - 0.1));
     clip.gainDb = std::clamp(gainDb, -60.0, 6.0);
     clip.fadeInSeconds = std::max(0.0, fadeInSeconds);
     clip.fadeOutSeconds = std::max(0.0, fadeOutSeconds);
+    const double available = std::max(0.1, sourceDuration - clip.sourceOffsetSeconds);
     clip.lengthSeconds = lengthSeconds <= 0.0
-        ? clip.sourceDurationSeconds()
-        : std::clamp(lengthSeconds, 0.1, clip.sourceDurationSeconds());
+        ? available
+        : std::clamp(lengthSeconds, 0.1, available);
 }
 
 bool ProcessingEngine::processMusicWaveformChunks(int maxColumns) {

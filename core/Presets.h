@@ -23,6 +23,7 @@ struct ChainParams {
 
     // Tone EQ (tonal character; independent user choice)
     Tone tone = Tone::Natural;
+    double toneAmount = 0.0; // -1 = warm, 0 = natural, +1 = crisp
 
     // Auto-EQ (wide corrective curve derived from the source spectrum).
     // `autoEqBands` is computed at load and injected here; empty = none.
@@ -91,7 +92,9 @@ inline std::vector<EqBand> fullEqBands(const ChainParams& p) {
     std::vector<EqBand> bands;
     if (p.autoEqEnabled)
         bands.insert(bands.end(), p.autoEqBands.begin(), p.autoEqBands.end());
-    const auto tone = tonePresetBands(p.tone);
+    const auto tone = std::fabs(p.toneAmount) > 0.001
+        ? toneAmountBands(p.toneAmount)
+        : tonePresetBands(p.tone);
     bands.insert(bands.end(), tone.begin(), tone.end());
     return bands;
 }
@@ -161,11 +164,15 @@ inline double intensityToDriveDb(double intensity01) {
     return -6.0 + 14.0 * s;
 }
 
+inline double noiseReductionControlToBlend(double amount01) {
+    const double s = std::clamp(amount01, 0.0, 1.0);
+    return std::pow(s, 0.74);
+}
+
 inline void applyIntensity(ChainParams& params, double intensity01) {
     const double s = std::clamp(intensity01, 0.0, 1.0);
     params.intensityDriveDb = intensityToDriveDb(s);
-    params.deEssRangeDb = 8.0 * s;
-    params.baseAutoEqStrength = 0.6 * s;
+    params.baseAutoEqStrength = 0.25 + 0.35 * s;
 }
 
 // Returns true and sets `out` if `name` matches a known preset.

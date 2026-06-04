@@ -32,9 +32,15 @@ public:
     bool keyPressed(const juce::KeyPress& key) override;
 
 private:
+    class EncoderLookAndFeel : public juce::LookAndFeel_V4 {
+    public:
+        void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
+                              float sliderPosProportional, float rotaryStartAngle,
+                              float rotaryEndAngle, juce::Slider& slider) override;
+    };
+
     void loadFile(const juce::File& file);
     void applyParamsLive();
-    void recomputeLoudnessAsync();
     void doExport();
     void addMusicClip(double startSeconds = 0.0);
     double nextMusicClipStartSeconds() const;
@@ -42,12 +48,14 @@ private:
     void refreshMusicClipList();
     void syncMusicControlsFromSelection();
     void applySelectedMusicClipControls();
+    void applySelectedMusicClipVolume();
     void updateMusicTimeline();
     void togglePlay();
     void updateListenButton();
     void updateEqView();
     void updateLiveSpectrum();
     double currentDeviceRate() const;
+    double currentIntensity() const;
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void refreshOutputDeviceList();
@@ -58,7 +66,7 @@ private:
                      std::function<juce::String()> job,
                      std::function<void()> onSuccess);
     void setUiBusy(bool busy, const juce::String& message);
-    vc::Tone currentTone() const;
+    double currentToneAmount() const;
     vc::ChainParams buildParams() const;
     void resetProDefaults();
 
@@ -80,9 +88,9 @@ private:
     bool settingsPanelVisible_ = false;
     bool followSystemDefault_ = true;
     bool updatingDevice_ = false; // re-entrancy guard for device changes
+    EncoderLookAndFeel encoderLookAndFeel_;
     juce::Label toneCaption_, noiseReductionCaption_, strengthCaption_;
-    juce::ComboBox toneBox_;
-    juce::ToggleButton autoEqButton_ { "Auto-EQ (spectral)" };
+    juce::Slider toneSlider_;
     juce::Slider noiseReductionSlider_;
     juce::Slider strengthSlider_;
     juce::TextButton proButton_ { "Pro" };
@@ -101,6 +109,7 @@ private:
     juce::Slider musicStartSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
     MusicTimeline musicTimeline_;
     bool musicClipDragActive_ = false;
+    bool analyzingMedia_ = false;
     juce::TextButton exportButton_ { "Export video..." };
     juce::Label statusLabel_;
 
@@ -129,11 +138,9 @@ private:
     std::vector<float> liveDb_;      // fftSize/2, smoothed
     vc::SpectrumResult liveResult_;
 
-    // Debounced, off-thread recompute of the live loudness reference.
-    std::thread loudnessWorker_;
-    std::atomic<bool> loudnessBusy_ { false };
-    int loudnessCountdown_ = 0; // timer ticks remaining before recompute
-    double initialLoudnessRef_ = 0.0;
+    // Measured once during file analysis and interpolated for live preview.
+    double intensityMinLoudnessRef_ = 0.0;
+    double intensityMaxLoudnessRef_ = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

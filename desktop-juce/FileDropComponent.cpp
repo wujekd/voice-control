@@ -10,7 +10,7 @@ const juce::StringArray kMediaExtensions {
 }
 
 FileDropComponent::FileDropComponent()
-    : status_("Drag a video or audio file here\n(or click to browse)") {}
+    : status_("Add voice audio or video\nDrag here, or click to browse") {}
 
 bool FileDropComponent::looksLikeVideo(const juce::String& path) {
     return kMediaExtensions.contains(juce::File(path).getFileExtension()
@@ -31,18 +31,30 @@ void FileDropComponent::paint(juce::Graphics& g) {
     auto r = getLocalBounds().toFloat().reduced(8.0f);
 
     g.setColour(juce::Colour(0xff2b2f36));
-    g.fillRoundedRectangle(r, 10.0f);
+    g.fillRoundedRectangle(r, 4.0f);
 
     g.setColour(highlight_ ? juce::Colours::aqua : juce::Colour(0xff5a6270));
     const float dash[] = { 6.0f, 5.0f };
     juce::Path border;
-    border.addRoundedRectangle(r, 10.0f);
+    border.addRoundedRectangle(r, 4.0f);
     juce::PathStrokeType(highlight_ ? 2.5f : 1.5f).createDashedStroke(border, border, dash, 2);
     g.strokePath(border, juce::PathStrokeType(highlight_ ? 2.5f : 1.5f));
 
+    auto icon = r.withSizeKeepingCentre(24.0f, 24.0f);
+    icon.setY(r.getCentreY() - 22.0f);
+    g.setColour(juce::Colour(0xff2f7d52));
+    g.fillEllipse(icon);
+    g.setColour(juce::Colours::white);
+    const float cx = icon.getCentreX();
+    const float cy = icon.getCentreY();
+    g.drawLine(cx - 6.0f, cy, cx + 6.0f, cy, 2.0f);
+    g.drawLine(cx, cy - 6.0f, cx, cy + 6.0f, 2.0f);
+
     g.setColour(juce::Colours::white.withAlpha(0.85f));
-    g.setFont(juce::Font(juce::FontOptions(16.0f)));
-    g.drawFittedText(status_, getLocalBounds().reduced(16), juce::Justification::centred, 4);
+    g.setFont(juce::Font(juce::FontOptions(14.0f)));
+    auto textArea = getLocalBounds().reduced(16);
+    textArea.removeFromTop(26);
+    g.drawFittedText(status_, textArea, juce::Justification::centred, 3);
 }
 
 void FileDropComponent::mouseUp(const juce::MouseEvent&) {

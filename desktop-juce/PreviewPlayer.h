@@ -7,6 +7,7 @@
 #include "MusicClip.h"
 #include "Presets.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -17,6 +18,8 @@
 // from the source rate to the device rate.
 class PreviewPlayer : public juce::AudioSource {
 public:
+    PreviewPlayer();
+
     void setDrySource(const juce::AudioBuffer<float>* before, double sourceRate);
     // Progressive denoise: a planar buffer filled in the background plus per-hop
     // validity flags. The blend uses a denoised sample only where its hop is
@@ -25,6 +28,7 @@ public:
                            const std::atomic<std::uint8_t>* validHops,
                            int numHops, int hopSize);
     void setMusicClips(const std::vector<MusicClip>& clips);
+    void setMusicClipGainDb(int index, double gainDb);
     void setMutedMusicClipIndex(int index) { mutedMusicClipIndex_.store(index, std::memory_order_relaxed); }
     void clearSources();
 
@@ -72,6 +76,9 @@ private:
     int denoisedNumHops_ = 0;
     int denoisedHopSize_ = 480;
     std::vector<MusicClip> musicClips_;
+    static constexpr int kMaxLiveMusicClips = 64;
+    std::array<std::atomic<float>, kMaxLiveMusicClips> musicGainDb_;
+    std::array<float, kMaxLiveMusicClips> musicSmoothedGain_;
 
     vc::LiveVoiceChain chain_;
     juce::AudioBuffer<float> scratch_; // wet render scratch, preallocated

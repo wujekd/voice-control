@@ -33,7 +33,7 @@ public:
                   juce::String& error);
 
     bool addMusicClip(const juce::File& audioFile, juce::String& error);
-    void setMusicClipParams(int index, double startSeconds, double gainDb,
+    void setMusicClipParams(int index, double startSeconds, double sourceOffsetSeconds, double gainDb,
                             double fadeInSeconds, double fadeOutSeconds,
                             double lengthSeconds = 0.0);
     bool processMusicWaveformChunks(int maxColumns);

@@ -20,6 +20,7 @@ struct EqBand {
 enum class Tone { Natural, Warm, Crisp };
 
 std::vector<EqBand> tonePresetBands(Tone tone);
+std::vector<EqBand> toneAmountBands(double amount);
 
 // Derives wide corrective EQ from a whole-file average spectrum. Balances the
 // low / low-mid / presence / air regions against the speech "core" band,

@@ -11,7 +11,7 @@ public:
     std::function<void(double)> onAddAt;
     std::function<void(int)> onSelectClip;
     std::function<void(int, bool)> onClipDragStateChanged;
-    std::function<void(int, double, double)> onMoveOrResizeClip;
+    std::function<void(int, double, double, double)> onMoveOrResizeClip;
     std::function<void(double)> onSeek;
 
     void setVoice(const juce::AudioBuffer<float>* voice, double sampleRate);
@@ -48,6 +48,7 @@ private:
     int draggingIndex_ = -1;
     DragMode dragMode_ = DragMode::None;
     double dragStartSeconds_ = 0.0;
+    double dragSourceOffsetSeconds_ = 0.0;
     double dragLengthSeconds_ = 0.0;
     double dragMouseSeconds_ = 0.0;
     bool scrubbing_ = false;

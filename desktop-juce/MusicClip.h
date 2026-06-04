@@ -9,6 +9,7 @@ struct MusicClip {
     juce::AudioBuffer<float> audio;
     double sampleRate = 48000.0;
     double startSeconds = 0.0;
+    double sourceOffsetSeconds = 0.0;
     double lengthSeconds = 0.0;
     double gainDb = -18.0;
     double fadeInSeconds = 1.0;
@@ -22,8 +23,9 @@ struct MusicClip {
 
     double durationSeconds() const {
         const double source = sourceDurationSeconds();
+        const double available = juce::jmax(0.0, source - juce::jlimit(0.0, source, sourceOffsetSeconds));
         if (lengthSeconds <= 0.0)
-            return source;
-        return juce::jlimit(0.0, source, lengthSeconds);
+            return available;
+        return juce::jlimit(0.0, available, lengthSeconds);
     }
 };
