@@ -7,6 +7,51 @@ MainComponent::MainComponent() {
     titleLabel_.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
     addAndMakeVisible(titleLabel_);
 
+    settingsButton_.setWantsKeyboardFocus(false);
+    settingsButton_.onClick = [this] {
+        settingsPanelVisible_ = !settingsPanelVisible_;
+        settingsPanel_.setVisible(settingsPanelVisible_);
+        followSystemButton_.setVisible(settingsPanelVisible_);
+        outputDeviceLabel_.setVisible(settingsPanelVisible_);
+        outputDeviceBox_.setVisible(settingsPanelVisible_);
+        if (settingsPanelVisible_) {
+            if (auto* type = deviceManager_.getCurrentDeviceTypeObject())
+                type->scanForDevices();
+            refreshOutputDeviceList();
+        }
+        resized();
+    };
+    addAndMakeVisible(settingsButton_);
+
+    settingsPanel_.setVisible(false);
+    addChildComponent(settingsPanel_);
+
+    followSystemButton_.setToggleState(followSystemDefault_, juce::dontSendNotification);
+    followSystemButton_.setWantsKeyboardFocus(false);
+    followSystemButton_.onClick = [this] {
+        followSystemDefault_ = followSystemButton_.getToggleState();
+        outputDeviceBox_.setEnabled(!followSystemDefault_);
+        if (followSystemDefault_) {
+            const auto def = systemDefaultOutputName();
+            if (def.isNotEmpty())
+                setOutputDevice(def);
+        }
+    };
+    addChildComponent(followSystemButton_);
+
+    outputDeviceLabel_.setText("Output", juce::dontSendNotification);
+    addChildComponent(outputDeviceLabel_);
+
+    outputDeviceBox_.setEnabled(!followSystemDefault_);
+    outputDeviceBox_.onChange = [this] {
+        if (followSystemDefault_)
+            return;
+        const auto name = outputDeviceBox_.getText();
+        if (name.isNotEmpty())
+            setOutputDevice(name);
+    };
+    addChildComponent(outputDeviceBox_);
+
     addAndMakeVisible(dropArea_);
     dropArea_.onFile = [this](const juce::File& f) { loadFile(f); };
 
@@ -234,6 +279,7 @@ MainComponent::MainComponent() {
     deviceManager_.initialiseWithDefaultDevices(0, 2);
     sourcePlayer_.setSource(&player_);
     deviceManager_.addAudioCallback(&sourcePlayer_);
+    deviceManager_.addChangeListener(this);
 
     startTimerHz(30);
     setSize(920, 980);
@@ -242,6 +288,7 @@ MainComponent::MainComponent() {
 
 MainComponent::~MainComponent() {
     stopTimer();
+    deviceManager_.removeChangeListener(this);
     deviceManager_.removeAudioCallback(&sourcePlayer_);
     sourcePlayer_.setSource(nullptr);
     player_.clearSources();
@@ -357,6 +404,54 @@ void MainComponent::resetProDefaults() {
 void MainComponent::updateEqView() {
     const auto p = buildParams();
     spectrumView_.setEq(vc::fullEqBands(p), p.highpassHz, engine_.sampleRate());
+}
+
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster*) {
+    if (updatingDevice_)
+        return;
+
+    if (settingsPanelVisible_)
+        refreshOutputDeviceList();
+
+    if (followSystemDefault_) {
+        const auto def = systemDefaultOutputName();
+        if (def.isNotEmpty() && def != deviceManager_.getAudioDeviceSetup().outputDeviceName)
+            setOutputDevice(def);
+    }
+}
+
+juce::String MainComponent::systemDefaultOutputName() const {
+    if (auto* type = deviceManager_.getCurrentDeviceTypeObject()) {
+        const auto names = type->getDeviceNames(false);
+        const int idx = type->getDefaultDeviceIndex(false);
+        if (juce::isPositiveAndBelow(idx, names.size()))
+            return names[idx];
+    }
+    return {};
+}
+
+void MainComponent::setOutputDevice(const juce::String& name) {
+    const juce::ScopedValueSetter<bool> guard(updatingDevice_, true);
+    auto setup = deviceManager_.getAudioDeviceSetup();
+    if (setup.outputDeviceName == name)
+        return;
+    setup.outputDeviceName = name;
+    setup.useDefaultOutputChannels = true;
+    deviceManager_.setAudioDeviceSetup(setup, true);
+    refreshOutputDeviceList();
+}
+
+void MainComponent::refreshOutputDeviceList() {
+    outputDeviceBox_.clear(juce::dontSendNotification);
+    auto* type = deviceManager_.getCurrentDeviceTypeObject();
+    if (type == nullptr)
+        return;
+    const auto names = type->getDeviceNames(false);
+    for (int i = 0; i < names.size(); ++i)
+        outputDeviceBox_.addItem(names[i], i + 1);
+    const int idx = names.indexOf(deviceManager_.getAudioDeviceSetup().outputDeviceName);
+    if (idx >= 0)
+        outputDeviceBox_.setSelectedId(idx + 1, juce::dontSendNotification);
 }
 
 double MainComponent::currentDeviceRate() const {
@@ -674,8 +769,22 @@ void MainComponent::paint(juce::Graphics& g) {
 void MainComponent::resized() {
     auto r = getLocalBounds().reduced(16);
 
-    titleLabel_.setBounds(r.removeFromTop(30));
+    auto titleRow = r.removeFromTop(30);
+    settingsButton_.setBounds(titleRow.removeFromRight(90).reduced(2));
+    titleLabel_.setBounds(titleRow);
     r.removeFromTop(6);
+
+    if (settingsPanelVisible_) {
+        auto sArea = r.removeFromTop(78);
+        settingsPanel_.setBounds(sArea);
+        sArea.reduce(10, 18);
+        followSystemButton_.setBounds(sArea.removeFromTop(24));
+        sArea.removeFromTop(4);
+        auto devRow = sArea.removeFromTop(24);
+        outputDeviceLabel_.setBounds(devRow.removeFromLeft(100));
+        outputDeviceBox_.setBounds(devRow);
+        r.removeFromTop(8);
+    }
 
     dropArea_.setBounds(r.removeFromTop(78));
     r.removeFromTop(10);
