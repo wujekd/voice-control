@@ -1,7 +1,13 @@
 #include "FFmpeg.h"
 
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
+#include <string>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace vc {
 namespace {
@@ -17,9 +23,31 @@ std::string sh(const std::string& s) {
     return out;
 }
 
+std::string bundledFFmpegPath() {
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+
+    std::string executable(size, '\0');
+    if (_NSGetExecutablePath(executable.data(), &size) == 0) {
+        namespace fs = std::filesystem;
+        const fs::path executablePath(executable.c_str());
+        const fs::path candidate =
+            executablePath.parent_path().parent_path() / "Resources" / "ffmpeg";
+
+        std::error_code ec;
+        if (fs::exists(candidate, ec))
+            return candidate.string();
+    }
+#endif
+
+    return "ffmpeg";
+}
+
 } // namespace
 
-FFmpeg::FFmpeg(std::string ffmpegPath) : ffmpeg_(std::move(ffmpegPath)) {}
+FFmpeg::FFmpeg(std::string ffmpegPath)
+    : ffmpeg_(ffmpegPath == "ffmpeg" ? bundledFFmpegPath() : std::move(ffmpegPath)) {}
 
 void FFmpeg::run(const std::string& args) {
     const std::string cmd = sh(ffmpeg_) + " -hide_banner -loglevel error -y " + args;

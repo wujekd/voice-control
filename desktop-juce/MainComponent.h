@@ -20,7 +20,9 @@
 // processed instantly, and gain-reduction meters read the live chain. Only the
 // slow jobs (load/extract, export) run on a worker thread. Export still uses
 // the exact offline path in ProcessingEngine.
-class MainComponent : public juce::Component, private juce::Timer {
+class MainComponent : public juce::Component,
+                      private juce::Timer,
+                      private juce::ChangeListener {
 public:
     MainComponent();
     ~MainComponent() override;
@@ -35,6 +37,7 @@ private:
     void recomputeLoudnessAsync();
     void doExport();
     void addMusicClip(double startSeconds = 0.0);
+    double nextMusicClipStartSeconds() const;
     void removeSelectedMusicClip();
     void refreshMusicClipList();
     void syncMusicControlsFromSelection();
@@ -45,6 +48,11 @@ private:
     void updateEqView();
     void updateLiveSpectrum();
     double currentDeviceRate() const;
+
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;
+    void refreshOutputDeviceList();
+    juce::String systemDefaultOutputName() const;
+    void setOutputDevice(const juce::String& name);
 
     void runOnWorker(const juce::String& busyMsg,
                      std::function<juce::String()> job,
@@ -64,6 +72,14 @@ private:
     FileDropComponent dropArea_;
     SpectrumView spectrumView_;
     juce::Label titleLabel_;
+    juce::TextButton settingsButton_ { "Settings" };
+    juce::GroupComponent settingsPanel_ { "settingsPanel", "Audio Output" };
+    juce::ToggleButton followSystemButton_ { "Follow system output" };
+    juce::Label outputDeviceLabel_;
+    juce::ComboBox outputDeviceBox_;
+    bool settingsPanelVisible_ = false;
+    bool followSystemDefault_ = true;
+    bool updatingDevice_ = false; // re-entrancy guard for device changes
     juce::Label toneCaption_, noiseReductionCaption_, strengthCaption_;
     juce::ComboBox toneBox_;
     juce::ToggleButton autoEqButton_ { "Auto-EQ (spectral)" };
@@ -84,6 +100,7 @@ private:
     juce::Label musicCaption_, musicStartLabel_, musicVolumeLabel_, musicFadeInLabel_, musicFadeOutLabel_;
     juce::Slider musicStartSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
     MusicTimeline musicTimeline_;
+    bool musicClipDragActive_ = false;
     juce::TextButton exportButton_ { "Export video..." };
     juce::Label statusLabel_;
 

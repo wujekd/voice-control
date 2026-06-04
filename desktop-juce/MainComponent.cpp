@@ -7,6 +7,51 @@ MainComponent::MainComponent() {
     titleLabel_.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
     addAndMakeVisible(titleLabel_);
 
+    settingsButton_.setWantsKeyboardFocus(false);
+    settingsButton_.onClick = [this] {
+        settingsPanelVisible_ = !settingsPanelVisible_;
+        settingsPanel_.setVisible(settingsPanelVisible_);
+        followSystemButton_.setVisible(settingsPanelVisible_);
+        outputDeviceLabel_.setVisible(settingsPanelVisible_);
+        outputDeviceBox_.setVisible(settingsPanelVisible_);
+        if (settingsPanelVisible_) {
+            if (auto* type = deviceManager_.getCurrentDeviceTypeObject())
+                type->scanForDevices();
+            refreshOutputDeviceList();
+        }
+        resized();
+    };
+    addAndMakeVisible(settingsButton_);
+
+    settingsPanel_.setVisible(false);
+    addChildComponent(settingsPanel_);
+
+    followSystemButton_.setToggleState(followSystemDefault_, juce::dontSendNotification);
+    followSystemButton_.setWantsKeyboardFocus(false);
+    followSystemButton_.onClick = [this] {
+        followSystemDefault_ = followSystemButton_.getToggleState();
+        outputDeviceBox_.setEnabled(!followSystemDefault_);
+        if (followSystemDefault_) {
+            const auto def = systemDefaultOutputName();
+            if (def.isNotEmpty())
+                setOutputDevice(def);
+        }
+    };
+    addChildComponent(followSystemButton_);
+
+    outputDeviceLabel_.setText("Output", juce::dontSendNotification);
+    addChildComponent(outputDeviceLabel_);
+
+    outputDeviceBox_.setEnabled(!followSystemDefault_);
+    outputDeviceBox_.onChange = [this] {
+        if (followSystemDefault_)
+            return;
+        const auto name = outputDeviceBox_.getText();
+        if (name.isNotEmpty())
+            setOutputDevice(name);
+    };
+    addChildComponent(outputDeviceBox_);
+
     addAndMakeVisible(dropArea_);
     dropArea_.onFile = [this](const juce::File& f) { loadFile(f); };
 
@@ -31,7 +76,7 @@ MainComponent::MainComponent() {
     addAndMakeVisible(toneBox_);
 
     noiseReductionSlider_.setRange(0.0, 100.0, 1.0);
-    noiseReductionSlider_.setValue(100.0, juce::dontSendNotification);
+    noiseReductionSlider_.setValue(75.0, juce::dontSendNotification);
     noiseReductionSlider_.setTextValueSuffix(" %");
     noiseReductionSlider_.onValueChange = [this] { applyParamsLive(); };
     addAndMakeVisible(noiseReductionSlider_);
@@ -39,7 +84,7 @@ MainComponent::MainComponent() {
     strengthSlider_.setRange(0.0, 100.0, 1.0);
     strengthSlider_.setValue(100.0, juce::dontSendNotification);
     strengthSlider_.setTextValueSuffix(" %");
-    strengthSlider_.onValueChange = [this] { applyParamsLive(); };
+    strengthSlider_.onValueChange = [this] { applyParamsLive(); updateEqView(); };
     addAndMakeVisible(strengthSlider_);
 
     auto configureProSlider = [this](juce::Slider& slider, double min, double max,
@@ -129,7 +174,7 @@ MainComponent::MainComponent() {
     musicCaption_.setText("Backing Music", juce::dontSendNotification);
     addAndMakeVisible(musicCaption_);
 
-    addMusicButton_.onClick = [this] { addMusicClip(0.0); };
+    addMusicButton_.onClick = [this] { addMusicClip(nextMusicClipStartSeconds()); };
     addMusicButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(addMusicButton_);
 
@@ -161,8 +206,21 @@ MainComponent::MainComponent() {
     configureMusicSlider(musicFadeOutSlider_, 0.0, 20.0, 0.1, 1.0, " s");
 
     musicTimeline_.onAddAt = [this](double seconds) { addMusicClip(seconds); };
+    musicTimeline_.onSeek = [this](double seconds) {
+        player_.setPositionSeconds(seconds);
+        engine_.setPlayheadFrame(player_.currentSourceFrame()); // prioritize denoise here
+    };
     musicTimeline_.onSelectClip = [this](int index) {
         musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
+    };
+    musicTimeline_.onClipDragStateChanged = [this](int index, bool dragging) {
+        musicClipDragActive_ = dragging;
+        if (dragging) {
+            player_.setMutedMusicClipIndex(index);
+        } else {
+            player_.setMusicClips(engine_.musicClips());
+            player_.setMutedMusicClipIndex(-1);
+        }
     };
     musicTimeline_.onMoveOrResizeClip = [this](int index, double start, double length) {
         const auto& clips = engine_.musicClips();
@@ -171,7 +229,8 @@ MainComponent::MainComponent() {
         const auto& clip = clips[static_cast<std::size_t>(index)];
         engine_.setMusicClipParams(index, start, clip.gainDb,
                                    clip.fadeInSeconds, clip.fadeOutSeconds, length);
-        player_.setMusicClips(engine_.musicClips());
+        if (!musicClipDragActive_)
+            player_.setMusicClips(engine_.musicClips());
         syncMusicControlsFromSelection();
         updateMusicTimeline();
     };
@@ -196,7 +255,7 @@ MainComponent::MainComponent() {
 
     playButton_.setEnabled(false);
     listenButton_.setEnabled(false);
-    addMusicButton_.setEnabled(false);
+    addMusicButton_.setEnabled(true);
     removeMusicButton_.setEnabled(false);
     musicClipBox_.setEnabled(false);
     for (auto* s : { &musicStartSlider_, &musicVolumeSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
@@ -220,6 +279,7 @@ MainComponent::MainComponent() {
     deviceManager_.initialiseWithDefaultDevices(0, 2);
     sourcePlayer_.setSource(&player_);
     deviceManager_.addAudioCallback(&sourcePlayer_);
+    deviceManager_.addChangeListener(this);
 
     startTimerHz(30);
     setSize(920, 980);
@@ -228,6 +288,7 @@ MainComponent::MainComponent() {
 
 MainComponent::~MainComponent() {
     stopTimer();
+    deviceManager_.removeChangeListener(this);
     deviceManager_.removeAudioCallback(&sourcePlayer_);
     sourcePlayer_.setSource(nullptr);
     player_.clearSources();
@@ -345,12 +406,77 @@ void MainComponent::updateEqView() {
     spectrumView_.setEq(vc::fullEqBands(p), p.highpassHz, engine_.sampleRate());
 }
 
+void MainComponent::changeListenerCallback(juce::ChangeBroadcaster*) {
+    if (updatingDevice_)
+        return;
+
+    if (settingsPanelVisible_)
+        refreshOutputDeviceList();
+
+    if (followSystemDefault_) {
+        const auto def = systemDefaultOutputName();
+        if (def.isNotEmpty() && def != deviceManager_.getAudioDeviceSetup().outputDeviceName)
+            setOutputDevice(def);
+    }
+}
+
+juce::String MainComponent::systemDefaultOutputName() const {
+    if (auto* type = deviceManager_.getCurrentDeviceTypeObject()) {
+        const auto names = type->getDeviceNames(false);
+        const int idx = type->getDefaultDeviceIndex(false);
+        if (juce::isPositiveAndBelow(idx, names.size()))
+            return names[idx];
+    }
+    return {};
+}
+
+void MainComponent::setOutputDevice(const juce::String& name) {
+    const juce::ScopedValueSetter<bool> guard(updatingDevice_, true);
+    auto setup = deviceManager_.getAudioDeviceSetup();
+    if (setup.outputDeviceName == name)
+        return;
+    setup.outputDeviceName = name;
+    setup.useDefaultOutputChannels = true;
+    deviceManager_.setAudioDeviceSetup(setup, true);
+    refreshOutputDeviceList();
+}
+
+void MainComponent::refreshOutputDeviceList() {
+    outputDeviceBox_.clear(juce::dontSendNotification);
+    auto* type = deviceManager_.getCurrentDeviceTypeObject();
+    if (type == nullptr)
+        return;
+    const auto names = type->getDeviceNames(false);
+    for (int i = 0; i < names.size(); ++i)
+        outputDeviceBox_.addItem(names[i], i + 1);
+    const int idx = names.indexOf(deviceManager_.getAudioDeviceSetup().outputDeviceName);
+    if (idx >= 0)
+        outputDeviceBox_.setSelectedId(idx + 1, juce::dontSendNotification);
+}
+
 double MainComponent::currentDeviceRate() const {
     if (auto* dev = deviceManager_.getCurrentAudioDevice()) {
         const double r = dev->getCurrentSampleRate();
         if (r > 0.0) return r;
     }
     return 48000.0;
+}
+
+double MainComponent::nextMusicClipStartSeconds() const {
+    const auto& clips = engine_.musicClips();
+    if (clips.empty())
+        return 0.0;
+
+    const int selected = musicClipBox_.getSelectedId() - 1;
+    if (selected >= 0 && selected < static_cast<int>(clips.size())) {
+        const auto& clip = clips[static_cast<std::size_t>(selected)];
+        return clip.startSeconds + clip.durationSeconds();
+    }
+
+    double end = 0.0;
+    for (const auto& clip : clips)
+        end = std::max(end, clip.startSeconds + clip.durationSeconds());
+    return end;
 }
 
 void MainComponent::updateLiveSpectrum() {
@@ -447,7 +573,8 @@ void MainComponent::loadFile(const juce::File& file) {
         },
         [this, file]() {
             player_.setDrySource(&engine_.beforeBuffer(), engine_.sampleRate());
-            player_.setDenoisedSource(engine_.hasDenoised() ? &engine_.denoisedBuffer() : nullptr);
+            player_.setDenoisedSource(engine_.denoisedPlanar(), engine_.denoisedValidHops(),
+                                      engine_.denoisedNumHops(), engine_.denoisedHopSize());
             player_.setInputLoudness(initialLoudnessRef_);
             applyParamsLive();
 
@@ -465,16 +592,13 @@ void MainComponent::loadFile(const juce::File& file) {
             updateEqView();
 
             const double target = buildParams().targetLufs;
-            const auto denoise = engine_.hasDenoised() ? "noise cache ready" : "noise cache unavailable";
             setUiBusy(false, juce::String::formatted(
-                "Loaded \"%s\"  -  %s, input %.1f LUFS, target %.0f LUFS.",
-                file.getFileName().toRawUTF8(), denoise, engine_.inputLufs(), target));
+                "Loaded \"%s\"  -  denoising in background, input %.1f LUFS, target %.0f LUFS.",
+                file.getFileName().toRawUTF8(), engine_.inputLufs(), target));
         });
 }
 
 void MainComponent::addMusicClip(double startSeconds) {
-    if (!engine_.hasAudio()) return;
-
     musicChooser_ = std::make_unique<juce::FileChooser>(
         "Add backing music", juce::File(), "*.wav;*.mp3;*.m4a;*.flac;*.aiff");
     musicChooser_->launchAsync(
@@ -495,13 +619,19 @@ void MainComponent::addMusicClip(double startSeconds) {
                     const int index = static_cast<int>(engine_.musicClips().size()) - 1;
                     if (index >= 0) {
                         const auto& clip = engine_.musicClips()[static_cast<std::size_t>(index)];
-                        const double projectDuration = engine_.sampleRate() > 0.0
-                            ? static_cast<double>(engine_.beforeBuffer().getNumSamples()) / engine_.sampleRate()
-                            : clip.sourceDurationSeconds();
-                        const double maxLength = std::max(0.1, projectDuration - startSeconds);
-                        engine_.setMusicClipParams(index, startSeconds, clip.gainDb,
+                        double start = std::max(0.0, startSeconds);
+                        double length = clip.sourceDurationSeconds();
+                        if (engine_.hasAudio()) {
+                            const double projectDuration = engine_.sampleRate() > 0.0
+                                ? static_cast<double>(engine_.beforeBuffer().getNumSamples()) / engine_.sampleRate()
+                                : clip.sourceDurationSeconds();
+                            start = juce::jlimit(0.0, std::max(0.0, projectDuration - 0.1), start);
+                            const double maxLength = std::max(0.1, projectDuration - start);
+                            length = std::min(clip.sourceDurationSeconds(), maxLength);
+                        }
+                        engine_.setMusicClipParams(index, start, clip.gainDb,
                                                    clip.fadeInSeconds, clip.fadeOutSeconds,
-                                                   std::min(clip.sourceDurationSeconds(), maxLength));
+                                                   length);
                     }
                     refreshMusicClipList();
                     if (index >= 0)
@@ -585,12 +715,12 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
     const bool haveAudio = engine_.hasAudio();
     toneBox_.setEnabled(!busy);
     autoEqButton_.setEnabled(!busy);
-    noiseReductionSlider_.setEnabled(!busy && haveAudio && engine_.hasDenoised());
+    noiseReductionSlider_.setEnabled(!busy && haveAudio);
     strengthSlider_.setEnabled(!busy);
     proButton_.setEnabled(!busy);
     playButton_.setEnabled(!busy && haveAudio);
     listenButton_.setEnabled(!busy && haveAudio);
-    addMusicButton_.setEnabled(!busy && haveAudio);
+    addMusicButton_.setEnabled(!busy);
     exportButton_.setEnabled(!busy && haveAudio);
     syncMusicControlsFromSelection();
 
@@ -618,11 +748,18 @@ void MainComponent::timerCallback() {
     else
         spectrumView_.setShowLive(false);
 
+    if (engine_.processMusicWaveformChunks(48))
+        updateMusicTimeline();
+
     const double playheadSeconds = engine_.sampleRate() > 0.0
         ? player_.getPositionNormalised()
             * static_cast<double>(engine_.beforeBuffer().getNumSamples()) / engine_.sampleRate()
         : 0.0;
     musicTimeline_.setPlayheadSeconds(playheadSeconds);
+
+    // Steer the background denoiser toward what's playing.
+    if (engine_.hasAudio())
+        engine_.setPlayheadFrame(player_.currentSourceFrame());
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -632,8 +769,22 @@ void MainComponent::paint(juce::Graphics& g) {
 void MainComponent::resized() {
     auto r = getLocalBounds().reduced(16);
 
-    titleLabel_.setBounds(r.removeFromTop(30));
+    auto titleRow = r.removeFromTop(30);
+    settingsButton_.setBounds(titleRow.removeFromRight(90).reduced(2));
+    titleLabel_.setBounds(titleRow);
     r.removeFromTop(6);
+
+    if (settingsPanelVisible_) {
+        auto sArea = r.removeFromTop(78);
+        settingsPanel_.setBounds(sArea);
+        sArea.reduce(10, 18);
+        followSystemButton_.setBounds(sArea.removeFromTop(24));
+        sArea.removeFromTop(4);
+        auto devRow = sArea.removeFromTop(24);
+        outputDeviceLabel_.setBounds(devRow.removeFromLeft(100));
+        outputDeviceBox_.setBounds(devRow);
+        r.removeFromTop(8);
+    }
 
     dropArea_.setBounds(r.removeFromTop(78));
     r.removeFromTop(10);

@@ -2,6 +2,8 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <vector>
+
 struct MusicClip {
     juce::String name;
     juce::AudioBuffer<float> audio;
@@ -11,6 +13,8 @@ struct MusicClip {
     double gainDb = -18.0;
     double fadeInSeconds = 1.0;
     double fadeOutSeconds = 1.0;
+    std::vector<float> waveformPeaks;
+    int waveformProcessedColumns = 0;
 
     double sourceDurationSeconds() const {
         return sampleRate > 0.0 ? static_cast<double>(audio.getNumSamples()) / sampleRate : 0.0;

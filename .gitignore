@@ -1,5 +1,8 @@
 .DS_Store
 build/
+dist/
+/GAP
+third_party/JUCE/
 research/noise_removal/.venv/
 research/noise_removal/.cache/
 research/noise_removal/experiments/*/data/input/*

@@ -139,7 +139,7 @@ inline ChainParams fixedVoiceCleanupParams() {
     params.limiterEnabled = true;
     params.limiterCeilingDb = -1.0;
     params.deEssFreqHz = 6200.0;
-    params.deEssThresholdDb = -37.0;
+    params.deEssThresholdDb = -30.0;
     params.deEssPresenceThresholdDb = -18.0;
     params.deEssRatio = 5.0;
     params.deEssAttackMs = 0.5;
