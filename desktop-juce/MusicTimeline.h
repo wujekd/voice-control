@@ -10,7 +10,9 @@ class MusicTimeline : public juce::Component {
 public:
     std::function<void(double)> onAddAt;
     std::function<void(int)> onSelectClip;
+    std::function<void(int, bool)> onClipDragStateChanged;
     std::function<void(int, double, double)> onMoveOrResizeClip;
+    std::function<void(double)> onSeek;
 
     void setVoice(const juce::AudioBuffer<float>* voice, double sampleRate);
     void setClips(const std::vector<MusicClip>* clips, int selectedIndex);
@@ -28,11 +30,13 @@ private:
     double xToSeconds(double x) const;
     double timelineDurationSeconds() const;
     juce::Rectangle<float> timelineBounds() const;
+    juce::Rectangle<float> voiceLaneBounds() const;
     juce::Rectangle<float> musicLaneBounds() const;
     juce::Rectangle<float> clipBounds(int index) const;
     int clipAt(juce::Point<float> p) const;
     bool plusAt(juce::Point<float> p, double& seconds) const;
     void drawWaveform(juce::Graphics& g, juce::Rectangle<float> area);
+    void drawClipWaveform(juce::Graphics& g, const MusicClip& clip, juce::Rectangle<float> area);
     void drawPlus(juce::Graphics& g, juce::Rectangle<float> bounds);
     void drawGapPluses(juce::Graphics& g);
 
@@ -46,4 +50,5 @@ private:
     double dragStartSeconds_ = 0.0;
     double dragLengthSeconds_ = 0.0;
     double dragMouseSeconds_ = 0.0;
+    bool scrubbing_ = false;
 };

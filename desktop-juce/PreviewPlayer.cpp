@@ -9,9 +9,14 @@ void PreviewPlayer::setDrySource(const juce::AudioBuffer<float>* before, double 
     readPos_ = 0.0;
 }
 
-void PreviewPlayer::setDenoisedSource(const juce::AudioBuffer<float>* denoised) {
+void PreviewPlayer::setDenoisedSource(const vc::AudioBuffer* denoised,
+                                      const std::atomic<std::uint8_t>* validHops,
+                                      int numHops, int hopSize) {
     const juce::ScopedLock sl(lock_);
     denoised_ = denoised;
+    denoisedValidHops_ = validHops;
+    denoisedNumHops_ = numHops;
+    denoisedHopSize_ = hopSize > 0 ? hopSize : 480;
 }
 
 void PreviewPlayer::setMusicClips(const std::vector<MusicClip>& clips) {
@@ -30,6 +35,7 @@ void PreviewPlayer::clearSources() {
     before_ = nullptr;
     denoised_ = nullptr;
     musicClips_.clear();
+    mutedMusicClipIndex_.store(-1, std::memory_order_relaxed);
     readPos_ = 0.0;
     rmsLin_ = 0.0;
     rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
@@ -53,6 +59,13 @@ double PreviewPlayer::getPositionNormalised() const {
     return juce::jlimit(0.0, 1.0, readPos_ / before_->getNumSamples());
 }
 
+void PreviewPlayer::setPositionSeconds(double seconds) {
+    const juce::ScopedLock sl(lock_);
+    if (before_ == nullptr || before_->getNumSamples() == 0) return;
+    readPos_ = juce::jlimit(0.0, static_cast<double>(before_->getNumSamples() - 1),
+                           seconds * sourceRate_);
+}
+
 void PreviewPlayer::prepareToPlay(int samplesPerBlock, double deviceSampleRate) {
     deviceRate_ = deviceSampleRate > 0.0 ? deviceSampleRate : 48000.0;
     blockSize_ = juce::jmax(32, samplesPerBlock);
@@ -67,7 +80,12 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
     if (outChannels <= 0 || numSamples <= 0)
         return;
 
-    for (const auto& clip : musicClips_) {
+    const int mutedIndex = mutedMusicClipIndex_.load(std::memory_order_relaxed);
+    for (int clipIndex = 0; clipIndex < static_cast<int>(musicClips_.size()); ++clipIndex) {
+        if (clipIndex == mutedIndex)
+            continue;
+
+        const auto& clip = musicClips_[static_cast<std::size_t>(clipIndex)];
         if (clip.audio.getNumSamples() <= 1 || clip.sampleRate <= 0.0)
             continue;
 
@@ -150,25 +168,39 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
     //    The chain always runs so the meters stay live and warm.
     const int procCh = juce::jmin(outChannels, scratch_.getNumChannels());
     const auto* den = denoised_;
-    const float wet = (den != nullptr && den->getNumSamples() > 1)
-        ? noiseReductionAmount_.load(std::memory_order_relaxed)
-        : 0.0f;
-    const float dry = 1.0f - wet;
-    if (wet <= 0.0f) {
+    const auto* valid = denoisedValidHops_;
+    const int denLen = (den != nullptr) ? static_cast<int>(den->numFrames()) : 0;
+    const float amount = noiseReductionAmount_.load(std::memory_order_relaxed);
+    const bool blend = den != nullptr && denLen > 1 && valid != nullptr && amount > 0.0f;
+    if (!blend) {
         for (int ch = 0; ch < procCh; ++ch)
             scratch_.copyFrom(ch, 0, *info.buffer, ch, info.startSample, produced);
     } else {
-        const int denChannels = den->getNumChannels();
-        const int denLen = den->getNumSamples();
+        const float wet = amount;
+        const float dry = 1.0f - wet;
+        const int denChannels = den->numChannels();
+        const int hopSize = denoisedHopSize_;
+        const int numHops = denoisedNumHops_;
         double denPos = readPos_ - produced * ratio;
         for (int i = 0; i < produced; ++i) {
             const int i0 = static_cast<int>(juce::jlimit(0.0, static_cast<double>(denLen - 2), denPos));
             const float frac = static_cast<float>(denPos - i0);
+            // The denoised sample and its interpolation neighbour are only usable
+            // once the worker has filled their hop(s); otherwise fall back to dry.
+            const int h0 = i0 / hopSize;
+            const int h1 = (i0 + 1) / hopSize;
+            const bool ready = h1 < numHops
+                && valid[h0].load(std::memory_order_acquire) != 0
+                && valid[h1].load(std::memory_order_acquire) != 0;
             for (int ch = 0; ch < procCh; ++ch) {
-                const int dc = juce::jmin(ch, denChannels - 1);
-                const float* d = den->getReadPointer(dc);
-                const float denSample = d[i0] + frac * (d[i0 + 1] - d[i0]);
                 const float origSample = info.buffer->getSample(ch, info.startSample + i);
+                if (!ready) {
+                    scratch_.setSample(ch, i, origSample);
+                    continue;
+                }
+                const int dc = juce::jmin(ch, denChannels - 1);
+                const float* d = den->channels[static_cast<std::size_t>(dc)].data();
+                const float denSample = d[i0] + frac * (d[i0 + 1] - d[i0]);
                 scratch_.setSample(ch, i, dry * origSample + wet * denSample);
             }
             denPos += ratio;

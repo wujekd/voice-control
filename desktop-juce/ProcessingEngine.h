@@ -3,11 +3,14 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "AudioBuffer.h"        // vc::AudioBuffer
+#include "DenoiseStreamer.h"    // vc::DenoiseStreamer (real-time denoise)
 #include "Eq.h"                 // vc::EqBand
 #include "MusicClip.h"
 #include "Presets.h"            // vc::Preset, vc::Tone, vc::ChainParams
 #include "SpectrumAnalyzer.h"   // vc::SpectrumResult
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 
 // Glue between the JUCE UI and the portable engine. Owns the decoded audio,
@@ -33,6 +36,7 @@ public:
     void setMusicClipParams(int index, double startSeconds, double gainDb,
                             double fadeInSeconds, double fadeOutSeconds,
                             double lengthSeconds = 0.0);
+    bool processMusicWaveformChunks(int maxColumns);
     void removeMusicClip(int index);
     const std::vector<MusicClip>& musicClips() const { return musicClips_; }
 
@@ -42,12 +46,22 @@ public:
     const std::vector<vc::EqBand>& autoEqBands() const { return autoEqBands_; }
 
     bool hasAudio() const { return original_.numFrames() > 0; }
-    bool hasDenoised() const { return denoisedReady_; }
+    bool hasDenoised() const { return streamer_.modelReady(); }
     bool hasProcessed() const { return processedReady_; }
     const juce::AudioBuffer<float>& beforeBuffer() const { return beforeJuce_; }
-    const juce::AudioBuffer<float>& denoisedBuffer() const { return denoisedJuce_; }
     const juce::AudioBuffer<float>& afterBuffer() const { return afterJuce_; }
     double sampleRate() const { return static_cast<double>(original_.sampleRate); }
+
+    // Progressive denoise output for the live preview blend. The planar buffer
+    // and per-hop validity flags are filled in the background; a set flag (read
+    // with acquire) means that hop's denoised samples are visible.
+    const vc::AudioBuffer* denoisedPlanar() const { return &streamer_.denoised(); }
+    const std::atomic<std::uint8_t>* denoisedValidHops() const { return streamer_.validHops(); }
+    int denoisedNumHops() const { return streamer_.numHops(); }
+    int denoisedHopSize() const { return streamer_.hopSize(); }
+
+    // Steer the background denoiser toward the currently-playing source frame.
+    void setPlayheadFrame(std::int64_t frame) { streamer_.setPlayheadFrame(frame); }
 
     // Integrated loudness of the (unprocessed) input, measured once at load.
     // May be -inf for silence.
@@ -72,15 +86,12 @@ private:
                                                const vc::AudioBuffer& denoised,
                                                double amount);
     static void mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips);
-    bool buildDenoisedCache(const juce::File& inputWav, juce::String& error);
 
     vc::AudioBuffer original_;
-    vc::AudioBuffer denoised_;
     vc::AudioBuffer processed_;
+    vc::DenoiseStreamer streamer_;
     juce::AudioBuffer<float> beforeJuce_;
-    juce::AudioBuffer<float> denoisedJuce_;
     juce::AudioBuffer<float> afterJuce_;
-    bool denoisedReady_ = false;
     bool processedReady_ = false;
     juce::File sourceFile_;
     bool sourceHasVideo_ = false;

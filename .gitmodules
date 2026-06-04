@@ -1,0 +1,4 @@
+[submodule "third_party/DeepFilterNet"]
+	path = third_party/DeepFilterNet
+	url = https://github.com/Rikorose/DeepFilterNet.git
+	branch = main

@@ -1,5 +1,6 @@
 #include "ProcessingEngine.h"
 
+#include "Denoiser.h"           // vc::Denoiser::findDefaultModel
 #include "FFmpeg.h"             // vc::FFmpeg
 #include "LoudnessNormalizer.h" // vc::LoudnessNormalizer (input measurement)
 #include "SpectrumAnalyzer.h"   // vc::SpectrumAnalyzer
@@ -10,7 +11,6 @@
 #include <cmath>
 #include <exception>
 #include <limits>
-#include <cstdlib>
 
 namespace {
 bool extensionIsVideo(const juce::File& f) {
@@ -18,49 +18,6 @@ bool extensionIsVideo(const juce::File& f) {
     return video.contains(f.getFileExtension().removeCharacters(".").toLowerCase());
 }
 
-juce::String sh(const juce::String& s) {
-    juce::String out = "'";
-    for (auto c : s) {
-        if (c == '\'') out += "'\\''";
-        else out += juce::String::charToString(c);
-    }
-    out += "'";
-    return out;
-}
-
-juce::File findDeepFilterTool() {
-    const juce::File cwd = juce::File::getCurrentWorkingDirectory();
-    for (juce::File dir = cwd; dir.exists(); dir = dir.getParentDirectory()) {
-        auto local = dir.getChildFile("research/noise_removal/.venv/bin/deepFilter");
-        if (local.existsAsFile())
-            return local;
-        if (dir == dir.getParentDirectory())
-            break;
-    }
-
-    const char* path = std::getenv("PATH");
-    if (path == nullptr)
-        return {};
-    juce::StringArray parts;
-    parts.addTokens(path, ":", "");
-    for (const auto& p : parts) {
-        auto tool = juce::File(p).getChildFile("deepFilter");
-        if (tool.existsAsFile())
-            return tool;
-    }
-    return {};
-}
-
-juce::File findRepoRoot() {
-    const juce::File cwd = juce::File::getCurrentWorkingDirectory();
-    for (juce::File dir = cwd; dir.exists(); dir = dir.getParentDirectory()) {
-        if (dir.getChildFile("research/noise_removal").isDirectory())
-            return dir;
-        if (dir == dir.getParentDirectory())
-            break;
-    }
-    return cwd;
-}
 }
 
 juce::AudioBuffer<float> ProcessingEngine::toJuce(const vc::AudioBuffer& src) {
@@ -92,55 +49,6 @@ vc::AudioBuffer ProcessingEngine::blendNoiseReduction(const vc::AudioBuffer& ori
             dst[i] = dry * src[i] + wet * den[i];
     }
     return out;
-}
-
-bool ProcessingEngine::buildDenoisedCache(const juce::File& inputWav, juce::String& error) {
-    denoisedReady_ = false;
-    denoised_ = {};
-    denoisedJuce_.setSize(0, 0);
-
-    const auto tool = findDeepFilterTool();
-    if (!tool.existsAsFile()) {
-        error = "DeepFilterNet tool not found; noise reduction cache skipped.";
-        return false;
-    }
-
-    auto outDir = juce::File::createTempFile("_df_out");
-    outDir.deleteFile();
-    if (!outDir.createDirectory()) {
-        error = "Could not create DeepFilterNet output folder.";
-        return false;
-    }
-
-    const juce::String cmd =
-        "XDG_CACHE_HOME=" + sh(findRepoRoot()
-                                   .getChildFile("research/noise_removal/.cache")
-                                   .getFullPathName())
-        + " " + sh(tool.getFullPathName())
-        + " --pf --no-suffix --log-level error --output-dir " + sh(outDir.getFullPathName())
-        + " " + sh(inputWav.getFullPathName());
-
-    const int rc = std::system(cmd.toRawUTF8());
-    const auto outWav = outDir.getChildFile(inputWav.getFileName());
-    if (rc != 0 || !outWav.existsAsFile()) {
-        outDir.deleteRecursively();
-        error = "DeepFilterNet processing failed; noise reduction cache skipped.";
-        return false;
-    }
-
-    try {
-        denoised_ = vc::readWav(outWav.getFullPathName().toStdString());
-        denoisedJuce_ = toJuce(denoised_);
-        denoisedReady_ = denoised_.sampleRate == original_.sampleRate
-                         && denoised_.numChannels() == original_.numChannels()
-                         && denoised_.numFrames() > 0;
-    } catch (const std::exception& e) {
-        error = e.what();
-        denoisedReady_ = false;
-    }
-
-    outDir.deleteRecursively();
-    return denoisedReady_;
 }
 
 void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips) {
@@ -189,6 +97,10 @@ void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<Mus
 }
 
 bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
+    // Stop any in-flight denoise from a previous file before original_ (which
+    // the worker references) is replaced below.
+    streamer_.stop();
+
     // ffmpeg decodes both video and bare audio files; -vn just no-ops on audio.
     auto temp = juce::File::createTempFile(".wav");
     try {
@@ -201,11 +113,10 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
         error = e.what();
         return false;
     }
+    temp.deleteFile();
     sourceFile_ = media;
     sourceHasVideo_ = extensionIsVideo(media);
-    musicClips_.clear();
     beforeJuce_ = toJuce(original_);
-    denoisedJuce_ = beforeJuce_;
     afterJuce_ = beforeJuce_; // until processed
 
     // Measure input loudness once; the live chain uses it for its cached gain.
@@ -223,20 +134,16 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
     spectrum_ = vc::SpectrumAnalyzer::analyze(original_, 12);
     autoEqBands_ = vc::computeAutoEqBands(spectrum_, 0.6);
 
-    juce::String denoiseError;
-    buildDenoisedCache(temp, denoiseError);
+    // Kick off the in-process neural denoise in the background. Playback can
+    // start immediately on the dry signal; the denoised version fills in (faster
+    // than real time) and is blended live per the noise-reduction amount.
+    streamer_.start(original_, vc::Denoiser::findDefaultModel());
 
-    temp.deleteFile();
     processedReady_ = false;
     return true;
 }
 
 bool ProcessingEngine::addMusicClip(const juce::File& audioFile, juce::String& error) {
-    if (!hasAudio()) {
-        error = "Load voice/video audio before adding music.";
-        return false;
-    }
-
     auto temp = juce::File::createTempFile(".wav");
     vc::AudioBuffer decoded;
     try {
@@ -274,6 +181,44 @@ void ProcessingEngine::setMusicClipParams(int index, double startSeconds, double
         : std::clamp(lengthSeconds, 0.1, clip.sourceDurationSeconds());
 }
 
+bool ProcessingEngine::processMusicWaveformChunks(int maxColumns) {
+    constexpr int kWaveformColumns = 320;
+    bool changed = false;
+    int remaining = std::max(0, maxColumns);
+
+    for (auto& clip : musicClips_) {
+        if (remaining <= 0)
+            break;
+        if (clip.audio.getNumSamples() <= 0 || clip.audio.getNumChannels() <= 0)
+            continue;
+        if (clip.waveformPeaks.empty()) {
+            clip.waveformPeaks.assign(kWaveformColumns, 0.0f);
+            clip.waveformProcessedColumns = 0;
+        }
+
+        const int samples = clip.audio.getNumSamples();
+        const int channels = clip.audio.getNumChannels();
+        while (remaining > 0 && clip.waveformProcessedColumns < static_cast<int>(clip.waveformPeaks.size())) {
+            const int col = clip.waveformProcessedColumns;
+            const int s0 = static_cast<int>(static_cast<int64_t>(col) * samples / kWaveformColumns);
+            const int s1 = std::max(s0 + 1,
+                static_cast<int>(static_cast<int64_t>(col + 1) * samples / kWaveformColumns));
+
+            float peak = 0.0f;
+            for (int s = s0; s < std::min(samples, s1); ++s)
+                for (int ch = 0; ch < channels; ++ch)
+                    peak = std::max(peak, std::abs(clip.audio.getSample(ch, s)));
+
+            clip.waveformPeaks[static_cast<std::size_t>(col)] = juce::jlimit(0.0f, 1.0f, peak);
+            ++clip.waveformProcessedColumns;
+            --remaining;
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 void ProcessingEngine::removeMusicClip(int index) {
     if (index < 0 || index >= static_cast<int>(musicClips_.size()))
         return;
@@ -288,9 +233,9 @@ double ProcessingEngine::measureChainLoudness(const vc::ChainParams& params) con
     p.loudnessEnabled = false; // measure the level arriving at the loudness stage
     p.limiterEnabled = false;
 
-    vc::AudioBuffer copy = denoisedReady_
-        ? blendNoiseReduction(original_, denoised_, params.noiseReductionAmount)
-        : original_;
+    // Measured at load before denoise is ready; the dry signal is a fine
+    // reference for the loudness-gain estimate.
+    vc::AudioBuffer copy = original_;
     vc::VoiceChain chain;
     chain.prepare(copy.sampleRate, copy.numChannels(), p);
     chain.process(copy);
@@ -303,8 +248,8 @@ double ProcessingEngine::measureChainLoudness(const vc::ChainParams& params) con
 void ProcessingEngine::process(const vc::ChainParams& params) {
     if (!hasAudio()) return;
 
-    processed_ = denoisedReady_
-        ? blendNoiseReduction(original_, denoised_, params.noiseReductionAmount)
+    processed_ = streamer_.modelReady()
+        ? blendNoiseReduction(original_, streamer_.denoised(), params.noiseReductionAmount)
         : original_;
     vc::VoiceChain chain;
     chain.prepare(processed_.sampleRate, processed_.numChannels(), params);
@@ -325,6 +270,8 @@ bool ProcessingEngine::exportTo(const juce::File& output, const vc::ChainParams&
         return false;
     }
 
+    // Export needs the whole file denoised, not just the played region.
+    streamer_.waitUntilComplete();
     process(params); // exact offline render with the chosen settings (incl. auto-EQ)
 
     const bool outIsWav = output.getFileExtension().equalsIgnoreCase(".wav");

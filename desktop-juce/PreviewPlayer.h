@@ -2,11 +2,13 @@
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include "AudioBuffer.h"
 #include "LiveVoiceChain.h"
 #include "MusicClip.h"
 #include "Presets.h"
 
 #include <atomic>
+#include <cstdint>
 
 // Plays the dry source and runs the live voice chain on it in real time.
 // "Before" = the dry buffer; "After" = the same buffer processed live this
@@ -16,8 +18,14 @@
 class PreviewPlayer : public juce::AudioSource {
 public:
     void setDrySource(const juce::AudioBuffer<float>* before, double sourceRate);
-    void setDenoisedSource(const juce::AudioBuffer<float>* denoised);
+    // Progressive denoise: a planar buffer filled in the background plus per-hop
+    // validity flags. The blend uses a denoised sample only where its hop is
+    // marked valid, falling back to dry elsewhere. Pass nullptrs to disable.
+    void setDenoisedSource(const vc::AudioBuffer* denoised,
+                           const std::atomic<std::uint8_t>* validHops,
+                           int numHops, int hopSize);
     void setMusicClips(const std::vector<MusicClip>& clips);
+    void setMutedMusicClipIndex(int index) { mutedMusicClipIndex_.store(index, std::memory_order_relaxed); }
     void clearSources();
 
     void setParams(const vc::ChainParams& params) { chain_.setParams(params); }
@@ -30,6 +38,12 @@ public:
     void setShowAfter(bool showAfter) { showAfter_.store(showAfter); }
 
     double getPositionNormalised() const;
+    void setPositionSeconds(double seconds);
+    // Current playback position in source frames (a lock-free hint for the
+    // background denoiser; may be a block stale).
+    std::int64_t currentSourceFrame() const {
+        return static_cast<std::int64_t>(readPos_);
+    }
 
     // Copies the latest `n` output samples (mono mix of what's being heard)
     // into `dest` for the GUI spectrum analyzer. Lock-free; n must be <= the
@@ -53,7 +67,10 @@ public:
 private:
     juce::CriticalSection lock_;
     const juce::AudioBuffer<float>* before_ = nullptr;
-    const juce::AudioBuffer<float>* denoised_ = nullptr;
+    const vc::AudioBuffer* denoised_ = nullptr;
+    const std::atomic<std::uint8_t>* denoisedValidHops_ = nullptr;
+    int denoisedNumHops_ = 0;
+    int denoisedHopSize_ = 480;
     std::vector<MusicClip> musicClips_;
 
     vc::LiveVoiceChain chain_;
@@ -61,6 +78,7 @@ private:
 
     std::atomic<bool> playing_ { false };
     std::atomic<bool> showAfter_ { false };
+    std::atomic<int> mutedMusicClipIndex_ { -1 };
     std::atomic<float> noiseReductionAmount_ { 1.0f };
     std::atomic<float> rmsLevelDb_ { -90.0f };
 
