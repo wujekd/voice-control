@@ -3,6 +3,13 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+constexpr float kClipEdgeGripTopInset = 16.0f;
+constexpr float kClipEdgeGripWidth = 7.0f;
+constexpr float kClipEdgeHitTopInset = 10.0f;
+constexpr float kClipEdgeHitWidth = 16.0f;
+}
+
 void MusicTimeline::setVoice(const juce::AudioBuffer<float>* voice, double sampleRate) {
     voice_ = voice;
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
@@ -67,6 +74,32 @@ juce::Rectangle<float> MusicTimeline::clipBounds(int index) const {
     return { x1, lane.getY() + 5.0f, std::max(8.0f, x2 - x1), lane.getHeight() - 10.0f };
 }
 
+juce::Rectangle<float> MusicTimeline::removeButtonBounds(int index) const {
+    auto b = clipBounds(index);
+    if (b.isEmpty())
+        return {};
+    return { b.getRight() - 44.0f, b.getBottom() - 18.0f, 14.0f, 14.0f };
+}
+
+juce::Point<float> MusicTimeline::fadeInHandlePosition(int index) const {
+    if (clips_ == nullptr || index < 0 || index >= static_cast<int>(clips_->size()))
+        return {};
+    const auto& clip = (*clips_)[static_cast<std::size_t>(index)];
+    auto b = clipBounds(index);
+    const double fade = juce::jlimit(0.0, clip.durationSeconds(), clip.fadeInSeconds);
+    return { static_cast<float>(secondsToX(clip.startSeconds + fade)), b.getY() + 9.0f };
+}
+
+juce::Point<float> MusicTimeline::fadeOutHandlePosition(int index) const {
+    if (clips_ == nullptr || index < 0 || index >= static_cast<int>(clips_->size()))
+        return {};
+    const auto& clip = (*clips_)[static_cast<std::size_t>(index)];
+    auto b = clipBounds(index);
+    const double length = clip.durationSeconds();
+    const double fade = juce::jlimit(0.0, length, clip.fadeOutSeconds);
+    return { static_cast<float>(secondsToX(clip.startSeconds + length - fade)), b.getY() + 9.0f };
+}
+
 int MusicTimeline::clipAt(juce::Point<float> p) const {
     if (clips_ == nullptr)
         return -1;
@@ -74,6 +107,39 @@ int MusicTimeline::clipAt(juce::Point<float> p) const {
         if (clipBounds(i).contains(p))
             return i;
     return -1;
+}
+
+bool MusicTimeline::removeButtonAt(juce::Point<float> p, int& index) const {
+    if (clips_ == nullptr)
+        return false;
+    for (int i = static_cast<int>(clips_->size()) - 1; i >= 0; --i) {
+        if (i == selectedIndex_ && removeButtonBounds(i).contains(p)) {
+            index = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MusicTimeline::fadeHandleAt(juce::Point<float> p, int& index, DragMode& mode) const {
+    if (clips_ == nullptr)
+        return false;
+    constexpr float handleRadius = 8.0f;
+    for (int i = static_cast<int>(clips_->size()) - 1; i >= 0; --i) {
+        if (i != selectedIndex_)
+            continue;
+        if (p.getDistanceFrom(fadeInHandlePosition(i)) <= handleRadius) {
+            index = i;
+            mode = DragMode::FadeIn;
+            return true;
+        }
+        if (p.getDistanceFrom(fadeOutHandlePosition(i)) <= handleRadius) {
+            index = i;
+            mode = DragMode::FadeOut;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool MusicTimeline::plusAt(juce::Point<float> p, double& seconds) const {
@@ -172,6 +238,68 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
     }
 }
 
+void MusicTimeline::drawClipFadeOverlay(juce::Graphics& g, const MusicClip& clip,
+                                        juce::Rectangle<float> area, bool selected) {
+    const double length = std::max(0.001, clip.durationSeconds());
+    const double fadeIn = juce::jlimit(0.0, length, clip.fadeInSeconds);
+    const double fadeOut = juce::jlimit(0.0, length, clip.fadeOutSeconds);
+    const float x0 = area.getX();
+    const float x1 = area.getRight();
+    const float yFull = area.getY() + 9.0f;
+    const float ySilent = area.getBottom() - 8.0f;
+    const float inX = static_cast<float>(secondsToX(clip.startSeconds + fadeIn));
+    const float outX = static_cast<float>(secondsToX(clip.startSeconds + length - fadeOut));
+
+    g.setColour(juce::Colours::black.withAlpha(0.16f));
+    if (fadeIn > 0.0) {
+        juce::Path shade;
+        shade.startNewSubPath(x0, ySilent);
+        shade.lineTo(inX, yFull);
+        shade.lineTo(x0, yFull);
+        shade.closeSubPath();
+        g.fillPath(shade);
+    }
+    if (fadeOut > 0.0) {
+        juce::Path shade;
+        shade.startNewSubPath(outX, yFull);
+        shade.lineTo(x1, ySilent);
+        shade.lineTo(x1, yFull);
+        shade.closeSubPath();
+        g.fillPath(shade);
+    }
+
+    juce::Path envelope;
+    envelope.startNewSubPath(x0, fadeIn > 0.0 ? ySilent : yFull);
+    envelope.lineTo(inX, yFull);
+    envelope.lineTo(outX, yFull);
+    envelope.lineTo(x1, fadeOut > 0.0 ? ySilent : yFull);
+    g.setColour(juce::Colours::white.withAlpha(selected ? 0.82f : 0.48f));
+    g.strokePath(envelope, juce::PathStrokeType(selected ? 2.0f : 1.4f));
+
+    if (!selected)
+        return;
+
+    auto drawHandle = [&g](juce::Point<float> p) {
+        g.setColour(juce::Colour(0xff15181d));
+        g.fillEllipse(p.x - 5.5f, p.y - 5.5f, 11.0f, 11.0f);
+        g.setColour(juce::Colour(0xffeaffed));
+        g.fillEllipse(p.x - 3.8f, p.y - 3.8f, 7.6f, 7.6f);
+        g.setColour(juce::Colour(0xff6ee07a));
+        g.drawEllipse(p.x - 5.5f, p.y - 5.5f, 11.0f, 11.0f, 1.2f);
+    };
+    drawHandle(fadeInHandlePosition(selectedIndex_));
+    drawHandle(fadeOutHandlePosition(selectedIndex_));
+}
+
+void MusicTimeline::drawClipRemoveButton(juce::Graphics& g, juce::Rectangle<float> bounds) {
+    g.setColour(juce::Colour(0xdd15181d));
+    g.fillEllipse(bounds);
+    g.setColour(juce::Colours::white.withAlpha(0.9f));
+    const auto c = bounds.getCentre();
+    g.drawLine(c.x - 4.0f, c.y - 4.0f, c.x + 4.0f, c.y + 4.0f, 1.6f);
+    g.drawLine(c.x + 4.0f, c.y - 4.0f, c.x - 4.0f, c.y + 4.0f, 1.6f);
+}
+
 void MusicTimeline::drawPlus(juce::Graphics& g, juce::Rectangle<float> bounds) {
     g.setColour(juce::Colour(0xff2f7d52));
     g.fillEllipse(bounds);
@@ -196,12 +324,14 @@ void MusicTimeline::drawGapPluses(juce::Graphics& g) {
     }
     std::sort(ranges.begin(), ranges.end());
 
+    // Keep the gap "+" below the fade-handle row so it doesn't overlap a clip's fade-out dot.
+    const float plusY = lane.getBottom() - 14.0f;
     double cursor = 0.0;
     bool drew = false;
     for (const auto& r : ranges) {
         if (r.first - cursor > 0.25) {
             const double center = (cursor + r.first) * 0.5;
-            drawPlus(g, lane.withCentre({ static_cast<float>(secondsToX(center)), lane.getCentreY() })
+            drawPlus(g, lane.withCentre({ static_cast<float>(secondsToX(center)), plusY })
                            .withSizeKeepingCentre(24.0f, 24.0f));
             drew = true;
         }
@@ -209,7 +339,7 @@ void MusicTimeline::drawGapPluses(juce::Graphics& g) {
     }
     if (duration - cursor > 0.25) {
         const double center = (cursor + duration) * 0.5;
-        drawPlus(g, lane.withCentre({ static_cast<float>(secondsToX(center)), lane.getCentreY() })
+        drawPlus(g, lane.withCentre({ static_cast<float>(secondsToX(center)), plusY })
                        .withSizeKeepingCentre(24.0f, 24.0f));
         drew = true;
     }
@@ -235,16 +365,98 @@ void MusicTimeline::paint(juce::Graphics& g) {
     drawGapPluses(g);
 
     if (clips_ != nullptr) {
-        for (int i = 0; i < static_cast<int>(clips_->size()); ++i) {
+        const int count = static_cast<int>(clips_->size());
+        // Pass 1: clip bodies + waveforms + labels. Where a clip overlaps an
+        // earlier (already-drawn) clip, its body is drawn translucent over the
+        // overlap so the clip beneath shows through — the visual cue for a crossfade.
+        for (int i = 0; i < count; ++i) {
             auto b = clipBounds(i);
+            if (b.isEmpty())
+                continue;
+
+            float overlapL = b.getRight();
+            float overlapR = b.getX();
+            for (int j = 0; j < i; ++j) {
+                auto bj = clipBounds(j);
+                if (bj.isEmpty())
+                    continue;
+                const float overlapLeft = std::max(b.getX(), bj.getX());
+                const float overlapRight = std::min(b.getRight(), bj.getRight());
+                if (overlapRight > overlapLeft) {
+                    overlapL = std::min(overlapL, overlapLeft);
+                    overlapR = std::max(overlapR, overlapRight);
+                }
+            }
+            const bool overlaps = overlapR > overlapL;
+
             g.setColour(i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9));
-            g.fillRoundedRectangle(b, 4.0f);
+            if (overlaps) {
+                const juce::Rectangle<int> overlapRect(
+                    juce::Rectangle<float>(overlapL, b.getY(), overlapR - overlapL, b.getHeight())
+                        .getSmallestIntegerContainer());
+                {
+                    juce::Graphics::ScopedSaveState s(g);
+                    g.excludeClipRegion(overlapRect);
+                    g.fillRoundedRectangle(b, 4.0f);
+                }
+                {
+                    juce::Graphics::ScopedSaveState s(g);
+                    g.reduceClipRegion(overlapRect);
+                    g.setColour((i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9))
+                                    .withAlpha(0.42f));
+                    g.fillRoundedRectangle(b, 4.0f);
+                }
+            } else {
+                g.fillRoundedRectangle(b, 4.0f);
+            }
+
             drawClipWaveform(g, (*clips_)[static_cast<std::size_t>(i)], b);
             g.setColour(juce::Colours::white);
-            g.drawText((*clips_)[static_cast<std::size_t>(i)].name, b.reduced(6, 0), juce::Justification::centredLeft);
+            auto labelBounds = b.reduced(6, 0);
+            float labelClearX = labelBounds.getX();
+            for (int j = 0; j < count; ++j) {
+                if (j == i)
+                    continue;
+                auto bj = clipBounds(j);
+                if (bj.isEmpty())
+                    continue;
+                const bool clipStartIsInOverlap = bj.getX() < b.getX() + 1.0f
+                    && bj.getRight() > b.getX() + 1.0f;
+                if (clipStartIsInOverlap)
+                    labelClearX = std::max(labelClearX, std::min(b.getRight(), bj.getRight()) + 6.0f);
+            }
+            if (i == selectedIndex_) {
+                const auto removeBounds = removeButtonBounds(i);
+                if (!removeBounds.isEmpty())
+                    labelBounds.setRight(std::max(labelBounds.getX() + 8.0f, removeBounds.getX() - 6.0f));
+            }
+            if (labelClearX > labelBounds.getX() && labelBounds.getWidth() > 8.0f)
+                labelBounds.setLeft(std::min(labelClearX, labelBounds.getRight() - 8.0f));
+            g.drawText((*clips_)[static_cast<std::size_t>(i)].name, labelBounds, juce::Justification::centredLeft);
             g.setColour(juce::Colour(0xaa101217));
-            g.fillRect(b.removeFromLeft(4.0f));
-            g.fillRect(clipBounds(i).removeFromRight(4.0f));
+            const auto edgeGripY = std::min(b.getBottom(), b.getY() + kClipEdgeGripTopInset);
+            const auto edgeGripHeight = std::max(0.0f, b.getBottom() - edgeGripY);
+            g.fillRect(juce::Rectangle<float>(b.getX(), edgeGripY, kClipEdgeGripWidth, edgeGripHeight));
+            g.fillRect(juce::Rectangle<float>(b.getRight() - kClipEdgeGripWidth, edgeGripY,
+                                              kClipEdgeGripWidth, edgeGripHeight));
+        }
+
+        // Pass 2: fade envelopes + handles on top of every body, so overlapping
+        // clips show both fade ramps crossing.
+        for (int i = 0; i < count; ++i) {
+            auto b = clipBounds(i);
+            if (b.isEmpty())
+                continue;
+            drawClipFadeOverlay(g, (*clips_)[static_cast<std::size_t>(i)], b, i == selectedIndex_);
+            if (i == selectedIndex_) {
+                g.setColour(juce::Colour(0xaa101217));
+                const auto edgeGripY = std::min(b.getBottom(), b.getY() + kClipEdgeGripTopInset);
+                const auto edgeGripHeight = std::max(0.0f, b.getBottom() - edgeGripY);
+                g.fillRect(juce::Rectangle<float>(b.getX(), edgeGripY, kClipEdgeGripWidth, edgeGripHeight));
+                g.fillRect(juce::Rectangle<float>(b.getRight() - kClipEdgeGripWidth, edgeGripY,
+                                                  kClipEdgeGripWidth, edgeGripHeight));
+                drawClipRemoveButton(g, removeButtonBounds(i));
+            }
         }
     }
 
@@ -257,21 +469,89 @@ void MusicTimeline::paint(juce::Graphics& g) {
 void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
     const auto p = e.position;
     double addSeconds = 0.0;
+    int removeIndex = -1;
+    if (removeButtonAt(p, removeIndex)) {
+        selectedIndex_ = removeIndex;
+        if (onSelectClip)
+            onSelectClip(removeIndex);
+        if (onRemoveClip)
+            onRemoveClip(removeIndex);
+        repaint();
+        return;
+    }
+
+    int fadeIndex = -1;
+    DragMode fadeMode = DragMode::None;
+    if (fadeHandleAt(p, fadeIndex, fadeMode)) {
+        draggingIndex_ = fadeIndex;
+        selectedIndex_ = fadeIndex;
+        if (onSelectClip)
+            onSelectClip(fadeIndex);
+        if (onClipEditStarted)
+            onClipEditStarted(fadeIndex);
+        const auto& clip = (*clips_)[static_cast<std::size_t>(fadeIndex)];
+        dragStartSeconds_ = clip.startSeconds;
+        dragLengthSeconds_ = clip.durationSeconds();
+        dragFadeInSeconds_ = clip.fadeInSeconds;
+        dragFadeOutSeconds_ = clip.fadeOutSeconds;
+        dragMouseSeconds_ = xToSeconds(p.x);
+        dragMode_ = fadeMode;
+        repaint();
+        return;
+    }
+
+    if (clips_ != nullptr && selectedIndex_ >= 0 && selectedIndex_ < static_cast<int>(clips_->size())) {
+        const auto b = clipBounds(selectedIndex_);
+        const bool inSelectedEdgeGripRow = !b.isEmpty()
+            && p.y >= b.getY() + kClipEdgeHitTopInset
+            && p.y <= b.getBottom();
+        DragMode selectedEdgeMode = DragMode::None;
+        if (inSelectedEdgeGripRow && p.x <= b.getX() + kClipEdgeHitWidth && p.x >= b.getX() - 1.0f)
+            selectedEdgeMode = DragMode::ResizeLeft;
+        else if (inSelectedEdgeGripRow && p.x >= b.getRight() - kClipEdgeHitWidth && p.x <= b.getRight() + 1.0f)
+            selectedEdgeMode = DragMode::ResizeRight;
+
+        if (selectedEdgeMode != DragMode::None) {
+            draggingIndex_ = selectedIndex_;
+            if (onSelectClip)
+                onSelectClip(selectedIndex_);
+            if (onClipEditStarted)
+                onClipEditStarted(selectedIndex_);
+            const auto& clip = (*clips_)[static_cast<std::size_t>(selectedIndex_)];
+            dragStartSeconds_ = clip.startSeconds;
+            dragSourceOffsetSeconds_ = clip.sourceOffsetSeconds;
+            dragLengthSeconds_ = clip.durationSeconds();
+            dragFadeInSeconds_ = clip.fadeInSeconds;
+            dragFadeOutSeconds_ = clip.fadeOutSeconds;
+            dragMouseSeconds_ = xToSeconds(p.x);
+            dragMode_ = selectedEdgeMode;
+            if (onClipDragStateChanged)
+                onClipDragStateChanged(selectedIndex_, true);
+            repaint();
+            return;
+        }
+    }
+
     const int hit = clipAt(p);
     if (hit >= 0) {
         draggingIndex_ = hit;
         selectedIndex_ = hit;
         if (onSelectClip)
             onSelectClip(hit);
+        if (onClipEditStarted)
+            onClipEditStarted(hit);
         const auto b = clipBounds(hit);
         const auto& clip = (*clips_)[static_cast<std::size_t>(hit)];
         dragStartSeconds_ = clip.startSeconds;
         dragSourceOffsetSeconds_ = clip.sourceOffsetSeconds;
         dragLengthSeconds_ = clip.durationSeconds();
+        dragFadeInSeconds_ = clip.fadeInSeconds;
+        dragFadeOutSeconds_ = clip.fadeOutSeconds;
         dragMouseSeconds_ = xToSeconds(p.x);
-        if (p.x < b.getX() + 8.0f)
+        const bool inEdgeGripRow = p.y >= b.getY() + kClipEdgeHitTopInset && p.y <= b.getBottom();
+        if (inEdgeGripRow && p.x <= b.getX() + kClipEdgeHitWidth)
             dragMode_ = DragMode::ResizeLeft;
-        else if (p.x > b.getRight() - 8.0f)
+        else if (inEdgeGripRow && p.x >= b.getRight() - kClipEdgeHitWidth)
             dragMode_ = DragMode::ResizeRight;
         else
             dragMode_ = DragMode::Move;
@@ -333,6 +613,22 @@ void MusicTimeline::mouseDrag(const juce::MouseEvent& e) {
                                     dragSourceOffsetSeconds_ + trimDelta);
         length = juce::jlimit(0.1, std::min(sourceLength - sourceOffset, timelineLength - start),
                               end - start);
+    }
+
+    if (dragMode_ == DragMode::FadeIn) {
+        const double maxFade = std::max(0.0, dragLengthSeconds_ - juce::jlimit(0.0, dragLengthSeconds_, clip.fadeOutSeconds));
+        const double fadeIn = juce::jlimit(0.0, maxFade, dragFadeInSeconds_ + delta);
+        if (onAdjustClipFades)
+            onAdjustClipFades(draggingIndex_, fadeIn, clip.fadeOutSeconds);
+        return;
+    }
+
+    if (dragMode_ == DragMode::FadeOut) {
+        const double maxFade = std::max(0.0, dragLengthSeconds_ - juce::jlimit(0.0, dragLengthSeconds_, clip.fadeInSeconds));
+        const double fadeOut = juce::jlimit(0.0, maxFade, dragFadeOutSeconds_ - delta);
+        if (onAdjustClipFades)
+            onAdjustClipFades(draggingIndex_, clip.fadeInSeconds, fadeOut);
+        return;
     }
 
     if (onMoveOrResizeClip)

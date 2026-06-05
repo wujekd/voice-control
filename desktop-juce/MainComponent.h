@@ -14,6 +14,8 @@
 #include <atomic>
 #include <functional>
 #include <thread>
+#include <utility>
+#include <vector>
 
 // Top-level UI. Preview is live: tone / intensity changes are pushed
 // straight to the running chain (no re-render), the A/B toggle switches dry vs.
@@ -21,6 +23,7 @@
 // slow jobs (load/extract, export) run on a worker thread. Export still uses
 // the exact offline path in ProcessingEngine.
 class MainComponent : public juce::Component,
+                      private juce::MenuBarModel,
                       private juce::Timer,
                       private juce::ChangeListener {
 public:
@@ -32,6 +35,13 @@ public:
     bool keyPressed(const juce::KeyPress& key) override;
 
 private:
+    enum MenuItemIds {
+        toggleSettingsMenuId = 1,
+        toggleProMenuId = 2,
+    };
+
+    struct MusicUndoState;
+
     class EncoderLookAndFeel : public juce::LookAndFeel_V4 {
     public:
         void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
@@ -49,13 +59,27 @@ private:
     void syncMusicControlsFromSelection();
     void applySelectedMusicClipControls();
     void applySelectedMusicClipVolume();
+    void pushMusicUndoState();
+    void beginMusicUndoGesture();
+    void endMusicUndoGesture();
+    bool musicClipStateMatches(const MusicUndoState& state) const;
+    void undoMusicTimelineEdit();
     void updateMusicTimeline();
     void togglePlay();
     void updateListenButton();
     void updateEqView();
     void updateLiveSpectrum();
+    void requestProcessedSpectrumUpdate();
+    void startProcessedSpectrumUpdateIfNeeded();
+    void setSettingsPanelVisible(bool visible);
+    void setProPanelVisible(bool visible);
+    void updateMainMenu();
     double currentDeviceRate() const;
     double currentIntensity() const;
+
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex(int topLevelMenuIndex, const juce::String& menuName) override;
+    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void refreshOutputDeviceList();
@@ -79,8 +103,6 @@ private:
 
     FileDropComponent dropArea_;
     SpectrumView spectrumView_;
-    juce::Label titleLabel_;
-    juce::TextButton settingsButton_ { "Settings" };
     juce::GroupComponent settingsPanel_ { "settingsPanel", "Audio Output" };
     juce::ToggleButton followSystemButton_ { "Follow system output" };
     juce::Label outputDeviceLabel_;
@@ -93,7 +115,6 @@ private:
     juce::Slider toneSlider_;
     juce::Slider noiseReductionSlider_;
     juce::Slider strengthSlider_;
-    juce::TextButton proButton_ { "Pro" };
     juce::GroupComponent proPanel_ { "proPanel", "Pro" };
     juce::Label fastThresholdLabel_, fastRatioLabel_, glueThresholdLabel_, glueRatioLabel_, targetPreChainLabel_;
     juce::Slider fastThresholdSlider_, fastRatioSlider_, glueThresholdSlider_, glueRatioSlider_, targetPreChainSlider_;
@@ -109,23 +130,38 @@ private:
     juce::Slider musicStartSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
     MusicTimeline musicTimeline_;
     bool musicClipDragActive_ = false;
+    bool musicUndoGestureActive_ = false;
+    bool applyingMusicUndo_ = false;
+    struct MusicUndoState {
+        std::vector<MusicClip> clips;
+        int selectedIndex = -1;
+    };
+    std::vector<MusicUndoState> musicUndoStack_;
+    // Per-clip (fadeIn, fadeOut) captured at drag start, so overlap crossfades
+    // can be reset when clips are pulled apart again.
+    std::vector<std::pair<double, double>> musicClipFadeSnapshot_;
+    void applyMusicClipOverlapCrossfades(int draggedIndex);
     bool analyzingMedia_ = false;
     juce::TextButton exportButton_ { "Export video..." };
     juce::Label statusLabel_;
 
     bool proPanelVisible_ = false;
 
-    GrMeter fastCompMeter_ { "Peak Comp", 18.0f, juce::Colour(0xff66d9ef) };
-    GrMeter glueCompMeter_ { "Glue Comp", 18.0f, juce::Colour(0xffa6e22e) };
-    GrMeter deEssMeter_ { "De-ess", 18.0f, juce::Colour(0xffffc14d) };
-    GrMeter limiterMeter_ { "Limiter", 6.0f, juce::Colour(0xffff5d5d) };
+    GrMeter fastCompMeter_ { "Peak Comp", 10.0f, juce::Colour(0xff66d9ef) };
+    GrMeter glueCompMeter_ { "Glue Comp", 10.0f, juce::Colour(0xffa6e22e) };
+    GrMeter deEssMeter_ { "De-ess", 10.0f, juce::Colour(0xffffc14d) };
+    GrMeter limiterMeter_ { "Limiter", 10.0f, juce::Colour(0xffff5d5d) };
     VuMeter vuMeter_ { "VU" };
 
     double progress_ = 0.0;
     juce::ProgressBar progressBar_ { progress_ };
 
     std::thread worker_;
+    std::thread spectrumWorker_;
     std::atomic<bool> busy_ { false };
+    std::atomic<bool> spectrumWorkerRunning_ { false };
+    std::atomic<int> processedSpectrumRequest_ { 0 };
+    std::atomic<int> processedSpectrumRendered_ { 0 };
     std::unique_ptr<juce::FileChooser> exportChooser_;
     std::unique_ptr<juce::FileChooser> musicChooser_;
 

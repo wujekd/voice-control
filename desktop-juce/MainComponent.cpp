@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 
+#include <algorithm>
 #include <cmath>
 
 void MainComponent::EncoderLookAndFeel::drawRotarySlider(
@@ -47,25 +48,9 @@ void MainComponent::EncoderLookAndFeel::drawRotarySlider(
 MainComponent::MainComponent() {
     setWantsKeyboardFocus(true);
 
-    titleLabel_.setText("Voice Control", juce::dontSendNotification);
-    titleLabel_.setFont(juce::Font(juce::FontOptions(22.0f, juce::Font::bold)));
-    addAndMakeVisible(titleLabel_);
-
-    settingsButton_.setWantsKeyboardFocus(false);
-    settingsButton_.onClick = [this] {
-        settingsPanelVisible_ = !settingsPanelVisible_;
-        settingsPanel_.setVisible(settingsPanelVisible_);
-        followSystemButton_.setVisible(settingsPanelVisible_);
-        outputDeviceLabel_.setVisible(settingsPanelVisible_);
-        outputDeviceBox_.setVisible(settingsPanelVisible_);
-        if (settingsPanelVisible_) {
-            if (auto* type = deviceManager_.getCurrentDeviceTypeObject())
-                type->scanForDevices();
-            refreshOutputDeviceList();
-        }
-        resized();
-    };
-    addAndMakeVisible(settingsButton_);
+#if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu(this);
+#endif
 
     settingsPanel_.setVisible(false);
     addChildComponent(settingsPanel_);
@@ -185,35 +170,6 @@ MainComponent::MainComponent() {
 
     proPanel_.setVisible(false);
     addChildComponent(proPanel_);
-    proButton_.onClick = [this] {
-        proPanelVisible_ = !proPanelVisible_;
-        proPanel_.setVisible(proPanelVisible_);
-        for (auto* c : { static_cast<juce::Component*>(&fastThresholdLabel_),
-                         static_cast<juce::Component*>(&fastThresholdSlider_),
-                         static_cast<juce::Component*>(&fastRatioLabel_),
-                         static_cast<juce::Component*>(&fastRatioSlider_),
-                         static_cast<juce::Component*>(&glueThresholdLabel_),
-                         static_cast<juce::Component*>(&glueThresholdSlider_),
-                         static_cast<juce::Component*>(&glueRatioLabel_),
-                         static_cast<juce::Component*>(&glueRatioSlider_),
-                         static_cast<juce::Component*>(&targetPreChainLabel_),
-                         static_cast<juce::Component*>(&targetPreChainSlider_),
-                         static_cast<juce::Component*>(&deEssFreqLabel_),
-                         static_cast<juce::Component*>(&deEssFreqSlider_),
-                         static_cast<juce::Component*>(&deEssThresholdLabel_),
-                         static_cast<juce::Component*>(&deEssThresholdSlider_),
-                         static_cast<juce::Component*>(&deEssPresenceLabel_),
-                         static_cast<juce::Component*>(&deEssPresenceSlider_),
-                         static_cast<juce::Component*>(&deEssRatioLabel_),
-                         static_cast<juce::Component*>(&deEssRatioSlider_),
-                         static_cast<juce::Component*>(&deEssRangeLabel_),
-                         static_cast<juce::Component*>(&deEssRangeSlider_),
-                         static_cast<juce::Component*>(&resetProButton_) })
-            c->setVisible(proPanelVisible_);
-        resized();
-    };
-    proButton_.setWantsKeyboardFocus(false);
-    addAndMakeVisible(proButton_);
 
     playButton_.onClick = [this] { togglePlay(); };
     playButton_.setWantsKeyboardFocus(false);
@@ -221,7 +177,7 @@ MainComponent::MainComponent() {
 
     listenButton_.setClickingTogglesState(true);
     listenButton_.setWantsKeyboardFocus(false);
-    listenButton_.setToggleState(true, juce::dontSendNotification); // default: enhanced
+    listenButton_.setToggleState(false, juce::dontSendNotification); // default: enhanced (not bypassed)
     listenButton_.onClick = [this] { updateListenButton(); };
     addAndMakeVisible(listenButton_);
     updateListenButton();
@@ -237,7 +193,10 @@ MainComponent::MainComponent() {
     removeMusicButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(removeMusicButton_);
 
-    musicClipBox_.onChange = [this] { syncMusicControlsFromSelection(); };
+    musicClipBox_.onChange = [this] {
+        syncMusicControlsFromSelection();
+        updateMusicTimeline();
+    };
     addAndMakeVisible(musicClipBox_);
 
     musicStartLabel_.setText("Start", juce::dontSendNotification);
@@ -253,6 +212,8 @@ MainComponent::MainComponent() {
         slider.setValue(value, juce::dontSendNotification);
         slider.setTextValueSuffix(suffix);
         configureEncoder(slider);
+        slider.onDragStart = [this] { beginMusicUndoGesture(); };
+        slider.onDragEnd = [this] { endMusicUndoGesture(); };
         slider.onValueChange = [this] { applySelectedMusicClipControls(); };
         addAndMakeVisible(slider);
     };
@@ -270,11 +231,23 @@ MainComponent::MainComponent() {
     musicTimeline_.onSelectClip = [this](int index) {
         musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
     };
+    musicTimeline_.onRemoveClip = [this](int index) {
+        musicClipBox_.setSelectedId(index + 1, juce::dontSendNotification);
+        removeSelectedMusicClip();
+    };
+    musicTimeline_.onClipEditStarted = [this](int) {
+        beginMusicUndoGesture();
+    };
     musicTimeline_.onClipDragStateChanged = [this](int index, bool dragging) {
         musicClipDragActive_ = dragging;
         if (dragging) {
+            musicClipFadeSnapshot_.clear();
+            for (const auto& c : engine_.musicClips())
+                musicClipFadeSnapshot_.push_back({ c.fadeInSeconds, c.fadeOutSeconds });
             player_.setMutedMusicClipIndex(index);
         } else {
+            endMusicUndoGesture();
+            musicClipFadeSnapshot_.clear();
             player_.setMusicClips(engine_.musicClips());
             player_.setMutedMusicClipIndex(-1);
         }
@@ -286,8 +259,20 @@ MainComponent::MainComponent() {
         const auto& clip = clips[static_cast<std::size_t>(index)];
         engine_.setMusicClipParams(index, start, sourceOffset, clip.gainDb,
                                    clip.fadeInSeconds, clip.fadeOutSeconds, length);
+        applyMusicClipOverlapCrossfades(index);
         if (!musicClipDragActive_)
             player_.setMusicClips(engine_.musicClips());
+        syncMusicControlsFromSelection();
+        updateMusicTimeline();
+    };
+    musicTimeline_.onAdjustClipFades = [this](int index, double fadeIn, double fadeOut) {
+        const auto& clips = engine_.musicClips();
+        if (index < 0 || index >= static_cast<int>(clips.size()))
+            return;
+        const auto& clip = clips[static_cast<std::size_t>(index)];
+        engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, clip.gainDb,
+                                   fadeIn, fadeOut, clip.durationSeconds());
+        player_.setMusicClips(engine_.musicClips());
         syncMusicControlsFromSelection();
         updateMusicTimeline();
     };
@@ -339,11 +324,16 @@ MainComponent::MainComponent() {
     deviceManager_.addChangeListener(this);
 
     startTimerHz(30);
-    setSize(920, 980);
+    setSize(920, 994);
     grabKeyboardFocus();
 }
 
 MainComponent::~MainComponent() {
+#if JUCE_MAC
+    if (juce::MenuBarModel::getMacMainMenu() == this)
+        juce::MenuBarModel::setMacMainMenu(nullptr);
+#endif
+
     for (auto* s : { &toneSlider_, &noiseReductionSlider_, &strengthSlider_,
                      &fastThresholdSlider_, &fastRatioSlider_, &glueThresholdSlider_,
                      &glueRatioSlider_, &targetPreChainSlider_, &deEssFreqSlider_,
@@ -357,6 +347,8 @@ MainComponent::~MainComponent() {
     deviceManager_.removeAudioCallback(&sourcePlayer_);
     sourcePlayer_.setSource(nullptr);
     player_.clearSources();
+    if (spectrumWorker_.joinable())
+        spectrumWorker_.join();
     if (worker_.joinable())
         worker_.join();
 }
@@ -433,17 +425,19 @@ void MainComponent::syncMusicControlsFromSelection() {
 
 void MainComponent::applySelectedMusicClipControls() {
     const int index = musicClipBox_.getSelectedId() - 1;
+    const auto& clips = engine_.musicClips();
+    if (index < 0 || index >= static_cast<int>(clips.size()))
+        return;
+
+    if (!applyingMusicUndo_ && !musicUndoGestureActive_)
+        pushMusicUndoState();
     engine_.setMusicClipParams(index,
                                musicStartSlider_.getValue(),
-                               index >= 0 && index < static_cast<int>(engine_.musicClips().size())
-                                   ? engine_.musicClips()[static_cast<std::size_t>(index)].sourceOffsetSeconds
-                                   : 0.0,
+                               clips[static_cast<std::size_t>(index)].sourceOffsetSeconds,
                                musicVolumeSlider_.getValue(),
                                musicFadeInSlider_.getValue(),
                                musicFadeOutSlider_.getValue(),
-                               index >= 0 && index < static_cast<int>(engine_.musicClips().size())
-                                   ? engine_.musicClips()[static_cast<std::size_t>(index)].durationSeconds()
-                                   : 0.0);
+                               clips[static_cast<std::size_t>(index)].durationSeconds());
     player_.setMusicClips(engine_.musicClips());
     updateMusicTimeline();
 }
@@ -454,11 +448,159 @@ void MainComponent::applySelectedMusicClipVolume() {
     if (index < 0 || index >= static_cast<int>(clips.size()))
         return;
 
+    if (!applyingMusicUndo_ && !musicUndoGestureActive_)
+        pushMusicUndoState();
+
     const auto& clip = clips[static_cast<std::size_t>(index)];
     const double gainDb = musicVolumeSlider_.getValue();
     engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, gainDb,
                                clip.fadeInSeconds, clip.fadeOutSeconds, clip.durationSeconds());
     player_.setMusicClipGainDb(index, gainDb);
+}
+
+void MainComponent::pushMusicUndoState() {
+    if (applyingMusicUndo_)
+        return;
+
+    static constexpr int maxUndoStates = 12;
+    musicUndoStack_.push_back({ engine_.musicClips(), musicClipBox_.getSelectedId() - 1 });
+    if (static_cast<int>(musicUndoStack_.size()) > maxUndoStates)
+        musicUndoStack_.erase(musicUndoStack_.begin());
+}
+
+void MainComponent::beginMusicUndoGesture() {
+    if (musicUndoGestureActive_ || applyingMusicUndo_)
+        return;
+    pushMusicUndoState();
+    musicUndoGestureActive_ = true;
+}
+
+void MainComponent::endMusicUndoGesture() {
+    if (musicUndoGestureActive_ && !musicUndoStack_.empty()
+        && musicClipStateMatches(musicUndoStack_.back()))
+        musicUndoStack_.pop_back();
+    musicUndoGestureActive_ = false;
+}
+
+bool MainComponent::musicClipStateMatches(const MusicUndoState& state) const {
+    const auto& clips = engine_.musicClips();
+    if (clips.size() != state.clips.size())
+        return false;
+
+    constexpr double epsilon = 1.0e-6;
+    for (std::size_t i = 0; i < clips.size(); ++i) {
+        const auto& a = clips[i];
+        const auto& b = state.clips[i];
+        if (a.name != b.name
+            || std::abs(a.sampleRate - b.sampleRate) > epsilon
+            || std::abs(a.startSeconds - b.startSeconds) > epsilon
+            || std::abs(a.sourceOffsetSeconds - b.sourceOffsetSeconds) > epsilon
+            || std::abs(a.lengthSeconds - b.lengthSeconds) > epsilon
+            || std::abs(a.gainDb - b.gainDb) > epsilon
+            || std::abs(a.fadeInSeconds - b.fadeInSeconds) > epsilon
+            || std::abs(a.fadeOutSeconds - b.fadeOutSeconds) > epsilon)
+            return false;
+    }
+    return true;
+}
+
+void MainComponent::undoMusicTimelineEdit() {
+    if (musicUndoStack_.empty() || busy_.load())
+        return;
+
+    applyingMusicUndo_ = true;
+    auto state = std::move(musicUndoStack_.back());
+    musicUndoStack_.pop_back();
+    engine_.setMusicClips(std::move(state.clips));
+    player_.setMutedMusicClipIndex(-1);
+    player_.setMusicClips(engine_.musicClips());
+    musicClipFadeSnapshot_.clear();
+    musicClipDragActive_ = false;
+    musicUndoGestureActive_ = false;
+
+    refreshMusicClipList();
+    const int count = static_cast<int>(engine_.musicClips().size());
+    if (count > 0)
+        musicClipBox_.setSelectedId(juce::jlimit(1, count, state.selectedIndex + 1),
+                                    juce::sendNotification);
+    else
+        musicClipBox_.setSelectedId(0, juce::sendNotification);
+
+    updateMusicTimeline();
+    statusLabel_.setText("Undid music edit.", juce::dontSendNotification);
+    applyingMusicUndo_ = false;
+}
+
+void MainComponent::applyMusicClipOverlapCrossfades(int draggedIndex) {
+    const auto& clips = engine_.musicClips();
+    const int count = static_cast<int>(clips.size());
+    if (draggedIndex < 0 || draggedIndex >= count)
+        return;
+    if (static_cast<int>(musicClipFadeSnapshot_.size()) != count)
+        return; // no valid drag-start snapshot
+
+    struct ClipState {
+        double start = 0.0;
+        double end = 0.0;
+        double length = 0.0;
+        double fadeIn = 0.0;
+        double fadeOut = 0.0;
+    };
+
+    std::vector<ClipState> state;
+    state.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        const auto& c = clips[static_cast<std::size_t>(i)];
+        const double length = c.durationSeconds();
+        const auto snapshot = musicClipFadeSnapshot_[static_cast<std::size_t>(i)];
+        state.push_back({ c.startSeconds, c.startSeconds + length, length, snapshot.first, snapshot.second });
+    }
+
+    constexpr double epsilon = 1.0e-4;
+
+    for (int i = 0; i < count; ++i) {
+        if (i == draggedIndex)
+            continue;
+
+        const int leftIndex = state[static_cast<std::size_t>(draggedIndex)].start
+                                  <= state[static_cast<std::size_t>(i)].start
+            ? draggedIndex
+            : i;
+        const int rightIndex = leftIndex == draggedIndex ? i : draggedIndex;
+        auto& left = state[static_cast<std::size_t>(leftIndex)];
+        auto& right = state[static_cast<std::size_t>(rightIndex)];
+
+        const bool partialEdgeOverlap = left.start + epsilon < right.start
+            && right.start + epsilon < left.end
+            && left.end + epsilon < right.end;
+        if (!partialEdgeOverlap)
+            continue;
+
+        const double overlap = juce::jlimit(0.0, std::min(left.length, right.length), left.end - right.start);
+        if (overlap <= epsilon)
+            continue;
+
+        left.fadeOut = overlap;
+        right.fadeIn = overlap;
+    }
+
+    for (auto& s : state) {
+        if (s.fadeIn + s.fadeOut > s.length && s.fadeIn + s.fadeOut > 0.0) {
+            const double scale = s.length / (s.fadeIn + s.fadeOut);
+            s.fadeIn *= scale;
+            s.fadeOut *= scale;
+        }
+    }
+
+    for (int i = 0; i < count; ++i) {
+        const auto& c = clips[static_cast<std::size_t>(i)];
+        const auto& s = state[static_cast<std::size_t>(i)];
+        if (std::abs(c.fadeInSeconds - s.fadeIn) > epsilon
+            || std::abs(c.fadeOutSeconds - s.fadeOut) > epsilon) {
+            engine_.setMusicClipParams(i, c.startSeconds, c.sourceOffsetSeconds, c.gainDb,
+                                       s.fadeIn, s.fadeOut, s.length);
+        }
+    }
 }
 
 void MainComponent::updateMusicTimeline() {
@@ -479,6 +621,82 @@ void MainComponent::resetProDefaults() {
     deEssRatioSlider_.setValue(p.deEssRatio, juce::dontSendNotification);
     deEssRangeSlider_.setValue(p.deEssRangeDb, juce::dontSendNotification);
     applyParamsLive();
+}
+
+void MainComponent::setSettingsPanelVisible(bool visible) {
+    settingsPanelVisible_ = visible;
+    settingsPanel_.setVisible(settingsPanelVisible_);
+    followSystemButton_.setVisible(settingsPanelVisible_);
+    outputDeviceLabel_.setVisible(settingsPanelVisible_);
+    outputDeviceBox_.setVisible(settingsPanelVisible_);
+    if (settingsPanelVisible_) {
+        if (auto* type = deviceManager_.getCurrentDeviceTypeObject())
+            type->scanForDevices();
+        refreshOutputDeviceList();
+    }
+    resized();
+    updateMainMenu();
+}
+
+void MainComponent::setProPanelVisible(bool visible) {
+    proPanelVisible_ = visible;
+    proPanel_.setVisible(proPanelVisible_);
+    for (auto* c : { static_cast<juce::Component*>(&fastThresholdLabel_),
+                     static_cast<juce::Component*>(&fastThresholdSlider_),
+                     static_cast<juce::Component*>(&fastRatioLabel_),
+                     static_cast<juce::Component*>(&fastRatioSlider_),
+                     static_cast<juce::Component*>(&glueThresholdLabel_),
+                     static_cast<juce::Component*>(&glueThresholdSlider_),
+                     static_cast<juce::Component*>(&glueRatioLabel_),
+                     static_cast<juce::Component*>(&glueRatioSlider_),
+                     static_cast<juce::Component*>(&targetPreChainLabel_),
+                     static_cast<juce::Component*>(&targetPreChainSlider_),
+                     static_cast<juce::Component*>(&deEssFreqLabel_),
+                     static_cast<juce::Component*>(&deEssFreqSlider_),
+                     static_cast<juce::Component*>(&deEssThresholdLabel_),
+                     static_cast<juce::Component*>(&deEssThresholdSlider_),
+                     static_cast<juce::Component*>(&deEssPresenceLabel_),
+                     static_cast<juce::Component*>(&deEssPresenceSlider_),
+                     static_cast<juce::Component*>(&deEssRatioLabel_),
+                     static_cast<juce::Component*>(&deEssRatioSlider_),
+                     static_cast<juce::Component*>(&deEssRangeLabel_),
+                     static_cast<juce::Component*>(&deEssRangeSlider_),
+                     static_cast<juce::Component*>(&resetProButton_) })
+        c->setVisible(proPanelVisible_);
+    resized();
+    updateMainMenu();
+}
+
+void MainComponent::updateMainMenu() {
+#if JUCE_MAC
+    menuItemsChanged();
+#endif
+}
+
+juce::StringArray MainComponent::getMenuBarNames() {
+    return { "View" };
+}
+
+juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce::String&) {
+    juce::PopupMenu menu;
+    if (topLevelMenuIndex == 0) {
+        menu.addItem(toggleSettingsMenuId, "Audio Output Settings", true, settingsPanelVisible_);
+        menu.addItem(toggleProMenuId, "Pro Controls", true, proPanelVisible_);
+    }
+    return menu;
+}
+
+void MainComponent::menuItemSelected(int menuItemID, int) {
+    switch (menuItemID) {
+        case toggleSettingsMenuId:
+            setSettingsPanelVisible(!settingsPanelVisible_);
+            break;
+        case toggleProMenuId:
+            setProPanelVisible(!proPanelVisible_);
+            break;
+        default:
+            break;
+    }
 }
 
 void MainComponent::updateEqView() {
@@ -595,6 +813,45 @@ void MainComponent::applyParamsLive() {
         player_.setInputLoudness(loudnessRef);
     player_.setNoiseReductionAmount(params.noiseReductionAmount);
     player_.setParams(params);             // instant: sound changes now
+    requestProcessedSpectrumUpdate();
+}
+
+void MainComponent::requestProcessedSpectrumUpdate() {
+    if (!engine_.hasAudio())
+        return;
+    processedSpectrumRequest_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void MainComponent::startProcessedSpectrumUpdateIfNeeded() {
+    if (!engine_.hasAudio() || busy_.load() || player_.isPlaying())
+        return;
+    if (spectrumWorkerRunning_.load(std::memory_order_relaxed))
+        return;
+
+    const int request = processedSpectrumRequest_.load(std::memory_order_relaxed);
+    if (request == processedSpectrumRendered_.load(std::memory_order_relaxed))
+        return;
+
+    if (spectrumWorker_.joinable())
+        spectrumWorker_.join();
+
+    const auto params = buildParams();
+    spectrumWorkerRunning_.store(true, std::memory_order_relaxed);
+    juce::Component::SafePointer<MainComponent> safe(this);
+    spectrumWorker_ = std::thread([safe, params, request]() {
+        if (safe == nullptr)
+            return;
+        auto resultSpectrum = safe->engine_.analyzeProcessedVoiceSpectrum(params);
+        juce::MessageManager::callAsync([safe, readySpectrum = std::move(resultSpectrum), request]() mutable {
+            if (safe == nullptr)
+                return;
+            if (request == safe->processedSpectrumRequest_.load(std::memory_order_relaxed)) {
+                safe->spectrumView_.setProcessedSpectrum(readySpectrum);
+                safe->processedSpectrumRendered_.store(request, std::memory_order_relaxed);
+            }
+            safe->spectrumWorkerRunning_.store(false, std::memory_order_relaxed);
+        });
+    });
 }
 
 void MainComponent::runOnWorker(const juce::String& busyMsg,
@@ -625,6 +882,12 @@ void MainComponent::runOnWorker(const juce::String& busyMsg,
 
 void MainComponent::loadFile(const juce::File& file) {
     player_.stop();
+    if (spectrumWorker_.joinable())
+        spectrumWorker_.join();
+    spectrumWorkerRunning_.store(false, std::memory_order_relaxed);
+    processedSpectrumRequest_.store(0, std::memory_order_relaxed);
+    processedSpectrumRendered_.store(0, std::memory_order_relaxed);
+    spectrumView_.setProcessedSpectrum({});
     analyzingMedia_ = true;
     dropArea_.setStatus("Analyzing " + file.getFileName() + "\nMeasuring level and voice profile");
     const auto params = buildParams();
@@ -658,7 +921,7 @@ void MainComponent::loadFile(const juce::File& file) {
 
             playButton_.setEnabled(true);
             listenButton_.setEnabled(true);
-            listenButton_.setToggleState(true, juce::dontSendNotification);
+            listenButton_.setToggleState(false, juce::dontSendNotification);
             updateListenButton();
             exportButton_.setEnabled(true);
             addMusicButton_.setEnabled(true);
@@ -668,6 +931,7 @@ void MainComponent::loadFile(const juce::File& file) {
             dropArea_.setStatus(file.getFileName());
             spectrumView_.setSpectrum(engine_.spectrum());
             updateEqView();
+            requestProcessedSpectrumUpdate();
 
             const double target = buildParams().targetLufs;
             analyzingMedia_ = false;
@@ -685,6 +949,7 @@ void MainComponent::addMusicClip(double startSeconds) {
         [this, startSeconds](const juce::FileChooser& fc) {
             const auto file = fc.getResult();
             if (file == juce::File()) return;
+            const auto undoState = MusicUndoState { engine_.musicClips(), musicClipBox_.getSelectedId() - 1 };
 
             runOnWorker(
                 "Adding backing music...",
@@ -694,7 +959,10 @@ void MainComponent::addMusicClip(double startSeconds) {
                         return err.isEmpty() ? "could not add music" : err;
                     return {};
                 },
-                [this, startSeconds]() {
+                [this, startSeconds, undoState]() {
+                    musicUndoStack_.push_back(undoState);
+                    if (static_cast<int>(musicUndoStack_.size()) > 12)
+                        musicUndoStack_.erase(musicUndoStack_.begin());
                     const int index = static_cast<int>(engine_.musicClips().size()) - 1;
                     if (index >= 0) {
                         const auto& clip = engine_.musicClips()[static_cast<std::size_t>(index)];
@@ -722,6 +990,8 @@ void MainComponent::addMusicClip(double startSeconds) {
 
 void MainComponent::removeSelectedMusicClip() {
     const int index = musicClipBox_.getSelectedId() - 1;
+    if (index >= 0 && index < static_cast<int>(engine_.musicClips().size()))
+        pushMusicUndoState();
     engine_.removeMusicClip(index);
     refreshMusicClipList();
     updateMusicTimeline();
@@ -769,6 +1039,13 @@ void MainComponent::togglePlay() {
 }
 
 bool MainComponent::keyPressed(const juce::KeyPress& key) {
+    const auto mods = key.getModifiers();
+    if ((mods.isCtrlDown() || mods.isCommandDown())
+        && (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')) {
+        undoMusicTimelineEdit();
+        return true;
+    }
+
     if (key == juce::KeyPress::spaceKey && playButton_.isEnabled()) {
         togglePlay();
         return true;
@@ -777,11 +1054,10 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
 }
 
 void MainComponent::updateListenButton() {
-    const bool enhanced = listenButton_.getToggleState();
-    player_.setShowAfter(enhanced);
-    listenButton_.setButtonText(enhanced ? "Hearing: ENHANCED  (click for Original)"
-                                         : "Hearing: ORIGINAL  (click for Enhanced)");
-    const auto col = enhanced ? juce::Colour(0xff2e7d32) : juce::Colour(0xff555b66);
+    const bool bypass = listenButton_.getToggleState();
+    player_.setShowAfter(!bypass); // bypass -> hear the original, unprocessed voice
+    listenButton_.setButtonText("Bypass");
+    const auto col = bypass ? juce::Colour(0xffb5852a) : juce::Colour(0xff3a3f49);
     listenButton_.setColour(juce::TextButton::buttonColourId, col);
     listenButton_.setColour(juce::TextButton::buttonOnColourId, col);
 }
@@ -796,7 +1072,6 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
     toneSlider_.setEnabled(!busy);
     noiseReductionSlider_.setEnabled(!busy && haveAudio);
     strengthSlider_.setEnabled(!busy);
-    proButton_.setEnabled(!busy);
     playButton_.setEnabled(!busy && haveAudio);
     listenButton_.setEnabled(!busy && haveAudio);
     addMusicButton_.setEnabled(!busy);
@@ -826,6 +1101,8 @@ void MainComponent::timerCallback() {
     if (engine_.processMusicWaveformChunks(48))
         updateMusicTimeline();
 
+    startProcessedSpectrumUpdateIfNeeded();
+
     const double playheadSeconds = engine_.sampleRate() > 0.0
         ? player_.getPositionNormalised()
             * static_cast<double>(engine_.beforeBuffer().getNumSamples()) / engine_.sampleRate()
@@ -843,11 +1120,6 @@ void MainComponent::paint(juce::Graphics& g) {
 
 void MainComponent::resized() {
     auto r = getLocalBounds().reduced(16);
-
-    auto titleRow = r.removeFromTop(30);
-    settingsButton_.setBounds(titleRow.removeFromRight(90).reduced(2));
-    titleLabel_.setBounds(titleRow);
-    r.removeFromTop(6);
 
     if (settingsPanelVisible_) {
         auto sArea = r.removeFromTop(78);
@@ -880,7 +1152,6 @@ void MainComponent::resized() {
     placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
     placeEncoder(strengthArea, strengthCaption_, strengthSlider_);
     placeEncoder(toneArea, toneCaption_, toneSlider_);
-    proButton_.setBounds(encoderRow.removeFromRight(58).removeFromTop(30).reduced(2));
     r.removeFromTop(8);
 
     spectrumView_.setBounds(r.removeFromTop(150));
@@ -888,11 +1159,34 @@ void MainComponent::resized() {
 
     auto timelineBounds = r.removeFromTop(150);
     musicTimeline_.setBounds(timelineBounds);
-    auto voiceDropBounds = timelineBounds.reduced(10);
-    voiceDropBounds.setHeight(58);
-    dropArea_.setBounds(voiceDropBounds);
+    // The voice drop field covers only the voice lane (top), leaving the music
+    // lane below clickable so its own "+" adds a music clip. Matches
+    // MusicTimeline's internal lane layout: reduced(10), 58px voice lane with a
+    // 16px label above the waveform.
+    auto voiceLane = timelineBounds.reduced(10).removeFromTop(58);
+    voiceLane.removeFromTop(16);
+    dropArea_.setBounds(voiceLane);
     dropArea_.setVisible(analyzingMedia_ || !engine_.hasAudio());
     dropArea_.toFront(false);
+    r.removeFromTop(8);
+
+    auto musicArea = r.removeFromTop(166);
+    musicCaption_.setBounds(musicArea.removeFromTop(20));
+    auto musicTop = musicArea.removeFromTop(30);
+    addMusicButton_.setBounds(musicTop.removeFromLeft(116).reduced(2));
+    removeMusicButton_.setBounds(musicTop.removeFromRight(86).reduced(2));
+    musicClipBox_.setBounds(musicTop.reduced(2));
+    musicArea.removeFromTop(6);
+    auto musicControls = musicArea.removeFromTop(110);
+    auto musicCellWidth = musicControls.getWidth() / 4;
+    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+                 musicStartLabel_, musicStartSlider_);
+    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+                 musicVolumeLabel_, musicVolumeSlider_);
+    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+                 musicFadeInLabel_, musicFadeInSlider_);
+    placeEncoder(musicControls.reduced(4, 0),
+                 musicFadeOutLabel_, musicFadeOutSlider_);
     r.removeFromTop(8);
 
     if (proPanelVisible_) {
@@ -921,29 +1215,10 @@ void MainComponent::resized() {
         r.removeFromTop(8);
     }
 
-    auto transport = r.removeFromTop(34);
-    playButton_.setBounds(transport.removeFromLeft(90).reduced(2));
-    listenButton_.setBounds(transport.reduced(2));
+    auto transport = r.removeFromTop(44);
+    listenButton_.setBounds(transport.removeFromRight(96).reduced(2));
+    playButton_.setBounds(transport.reduced(2));
     r.removeFromTop(10);
-
-    auto musicArea = r.removeFromTop(126);
-    musicCaption_.setBounds(musicArea.removeFromTop(20));
-    auto musicTop = musicArea.removeFromTop(30);
-    addMusicButton_.setBounds(musicTop.removeFromLeft(116).reduced(2));
-    removeMusicButton_.setBounds(musicTop.removeFromRight(86).reduced(2));
-    musicClipBox_.setBounds(musicTop.reduced(2));
-    musicArea.removeFromTop(4);
-    auto musicControls = musicArea.removeFromTop(66);
-    auto musicCellWidth = musicControls.getWidth() / 4;
-    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
-                 musicStartLabel_, musicStartSlider_);
-    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
-                 musicVolumeLabel_, musicVolumeSlider_);
-    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
-                 musicFadeInLabel_, musicFadeInSlider_);
-    placeEncoder(musicControls.reduced(4, 0),
-                 musicFadeOutLabel_, musicFadeOutSlider_);
-    r.removeFromTop(8);
 
     // Live gain-reduction meters.
     fastCompMeter_.setBounds(r.removeFromTop(20));

@@ -7,10 +7,11 @@ const juce::StringArray kMediaExtensions {
     // audio
     "wav", "mp3", "m4a", "aac", "flac", "aiff", "aif", "ogg"
 };
+const juce::String kDefaultStatus { "Add voice audio or video\nDrag here, or click to browse" };
 }
 
 FileDropComponent::FileDropComponent()
-    : status_("Add voice audio or video\nDrag here, or click to browse") {}
+    : status_(kDefaultStatus) {}
 
 bool FileDropComponent::looksLikeVideo(const juce::String& path) {
     return kMediaExtensions.contains(juce::File(path).getFileExtension()
@@ -28,33 +29,32 @@ void FileDropComponent::deliver(const juce::File& f) {
 }
 
 void FileDropComponent::paint(juce::Graphics& g) {
-    auto r = getLocalBounds().toFloat().reduced(8.0f);
+    auto r = getLocalBounds().toFloat();
 
-    g.setColour(juce::Colour(0xff2b2f36));
-    g.fillRoundedRectangle(r, 4.0f);
+    // Only the plus button: no frame, no instructions. Clicking anywhere in the
+    // field (the whole component) opens the file selector. Status text is shown
+    // only for transient messages (e.g. "Analyzing...").
+    const bool showText = status_.isNotEmpty() && status_ != kDefaultStatus;
 
-    g.setColour(highlight_ ? juce::Colours::aqua : juce::Colour(0xff5a6270));
-    const float dash[] = { 6.0f, 5.0f };
-    juce::Path border;
-    border.addRoundedRectangle(r, 4.0f);
-    juce::PathStrokeType(highlight_ ? 2.5f : 1.5f).createDashedStroke(border, border, dash, 2);
-    g.strokePath(border, juce::PathStrokeType(highlight_ ? 2.5f : 1.5f));
+    auto icon = r.withSizeKeepingCentre(30.0f, 30.0f);
+    if (showText)
+        icon.setY(r.getCentreY() - 20.0f);
 
-    auto icon = r.withSizeKeepingCentre(24.0f, 24.0f);
-    icon.setY(r.getCentreY() - 22.0f);
-    g.setColour(juce::Colour(0xff2f7d52));
+    g.setColour(highlight_ ? juce::Colours::aqua : juce::Colour(0xff2f7d52));
     g.fillEllipse(icon);
     g.setColour(juce::Colours::white);
     const float cx = icon.getCentreX();
     const float cy = icon.getCentreY();
-    g.drawLine(cx - 6.0f, cy, cx + 6.0f, cy, 2.0f);
-    g.drawLine(cx, cy - 6.0f, cx, cy + 6.0f, 2.0f);
+    g.drawLine(cx - 7.0f, cy, cx + 7.0f, cy, 2.0f);
+    g.drawLine(cx, cy - 7.0f, cx, cy + 7.0f, 2.0f);
 
-    g.setColour(juce::Colours::white.withAlpha(0.85f));
-    g.setFont(juce::Font(juce::FontOptions(14.0f)));
-    auto textArea = getLocalBounds().reduced(16);
-    textArea.removeFromTop(26);
-    g.drawFittedText(status_, textArea, juce::Justification::centred, 3);
+    if (showText) {
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::Font(juce::FontOptions(13.0f)));
+        auto textArea = getLocalBounds().reduced(12);
+        textArea.removeFromTop(textArea.getHeight() / 2 + 4);
+        g.drawFittedText(status_, textArea, juce::Justification::centred, 2);
+    }
 }
 
 void FileDropComponent::mouseUp(const juce::MouseEvent&) {
