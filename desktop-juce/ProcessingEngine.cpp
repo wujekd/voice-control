@@ -228,6 +228,10 @@ void ProcessingEngine::removeMusicClip(int index) {
     musicClips_.erase(musicClips_.begin() + index);
 }
 
+void ProcessingEngine::setMusicClips(std::vector<MusicClip> clips) {
+    musicClips_ = std::move(clips);
+}
+
 double ProcessingEngine::measureChainLoudness(const vc::ChainParams& params) const {
     if (original_.numFrames() == 0)
         return -std::numeric_limits<double>::infinity();
@@ -246,6 +250,20 @@ double ProcessingEngine::measureChainLoudness(const vc::ChainParams& params) con
     vc::LoudnessNormalizer meter;
     meter.prepare(copy.sampleRate, 0.0);
     return meter.measureIntegratedLufs(copy);
+}
+
+vc::SpectrumResult ProcessingEngine::analyzeProcessedVoiceSpectrum(const vc::ChainParams& params) const {
+    if (original_.numFrames() == 0)
+        return {};
+
+    vc::AudioBuffer preview = streamer_.modelReady()
+        ? blendNoiseReduction(original_, streamer_.denoised(), params.noiseReductionAmount)
+        : original_;
+
+    vc::VoiceChain chain;
+    chain.prepare(preview.sampleRate, preview.numChannels(), params);
+    chain.process(preview);
+    return vc::SpectrumAnalyzer::analyze(preview, 12);
 }
 
 void ProcessingEngine::process(const vc::ChainParams& params) {

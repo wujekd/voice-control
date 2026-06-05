@@ -38,6 +38,7 @@ public:
                             double lengthSeconds = 0.0);
     bool processMusicWaveformChunks(int maxColumns);
     void removeMusicClip(int index);
+    void setMusicClips(std::vector<MusicClip> clips);
     const std::vector<MusicClip>& musicClips() const { return musicClips_; }
 
     // Whole-file average spectrum and the auto-EQ curve derived from it,
@@ -74,6 +75,7 @@ public:
     // the preview hits the loudness target despite the compression. Runs an
     // offline pass on a copy of the input; call off the audio thread.
     double measureChainLoudness(const vc::ChainParams& params) const;
+    vc::SpectrumResult analyzeProcessedVoiceSpectrum(const vc::ChainParams& params) const;
     juce::File sourceFile() const { return sourceFile_; }
     bool sourceHasVideo() const { return sourceHasVideo_; }
 

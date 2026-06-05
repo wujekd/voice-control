@@ -249,10 +249,21 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
             info.buffer->copyFrom(ch, info.startSample, scratch_, ch, 0, produced);
     }
 
+    // 4. Capture the processed main file (voice only) for the live spectrum analyzer.
+    int w = analysisWrite_.load(std::memory_order_relaxed);
+    for (int i = 0; i < produced; ++i) {
+        float mono = 0.0f;
+        for (int ch = 0; ch < outChannels; ++ch)
+            mono += info.buffer->getSample(ch, info.startSample + i);
+        mono /= static_cast<float>(juce::jmax(1, outChannels));
+        analysisRing_[static_cast<std::size_t>(w & (kAnalysisSize - 1))] = mono;
+        ++w;
+    }
+    analysisWrite_.store(w, std::memory_order_release);
+
     mixMusicInto(*info.buffer, info.startSample, produced, timelineStartSeconds);
 
-    // 4. Capture the heard output (mono mix) for the live spectrum analyzer.
-    int w = analysisWrite_.load(std::memory_order_relaxed);
+    // 5. VU follows the full heard output, including backing music.
     double sumSquares = 0.0;
     for (int i = 0; i < produced; ++i) {
         float mono = 0.0f;
@@ -260,10 +271,7 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
             mono += info.buffer->getSample(ch, info.startSample + i);
         mono /= static_cast<float>(juce::jmax(1, outChannels));
         sumSquares += static_cast<double>(mono) * mono;
-        analysisRing_[static_cast<std::size_t>(w & (kAnalysisSize - 1))] = mono;
-        ++w;
     }
-    analysisWrite_.store(w, std::memory_order_release);
 
     const double blockRms = std::sqrt(sumSquares / juce::jmax(1, produced));
     const double coeff = std::exp(-static_cast<double>(produced) / (deviceRate_ * 0.30));

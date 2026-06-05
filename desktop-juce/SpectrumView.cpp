@@ -32,7 +32,7 @@ void SpectrumView::paint(juce::Graphics& g) {
                    juce::Justification::centredLeft);
     }
 
-    // Spectrum fill: live output while playing, otherwise the static average.
+    // Spectrum fill: live output while playing, otherwise the static input average.
     const bool live = showLive_ && liveSpectrum_.valid;
     const vc::SpectrumResult& spec = live ? liveSpectrum_ : spectrum_;
     if (spec.valid) {
@@ -54,14 +54,19 @@ void SpectrumView::paint(juce::Graphics& g) {
                          : juce::Colours::white.withAlpha(0.10f));
         g.fillPath(path);
 
-        // For the static view, show the resulting spectrum (input + EQ). When
-        // live, the fill already reflects the processing, so this is skipped.
+        // For the static view, show the whole-file processed voice spectrum.
+        // Fall back to input + EQ while the processed preview is still rendering.
         if (!live) {
+            const bool hasProcessed = processedSpectrum_.valid;
+            const auto& resultSpec = hasProcessed ? processedSpectrum_ : spec;
             juce::Path after;
             bool started = false;
             for (int px = 0; px <= (int) w; px += 2) {
                 const float f = xToFreq((float) px, w);
-                const float y = juce::jlimit(0.0f, h, mapDb(spec.dbAt(f) + (float) eqResponseAt(f)));
+                const float db = hasProcessed
+                    ? resultSpec.dbAt(f)
+                    : spec.dbAt(f) + static_cast<float>(eqResponseAt(f));
+                const float y = juce::jlimit(0.0f, h, mapDb(db));
                 if (!started) { after.startNewSubPath((float) px, y); started = true; }
                 else after.lineTo((float) px, y);
             }

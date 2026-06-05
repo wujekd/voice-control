@@ -18,6 +18,11 @@ public:
         repaint();
     }
 
+    void setProcessedSpectrum(const vc::SpectrumResult& spectrum) {
+        processedSpectrum_ = spectrum;
+        repaint();
+    }
+
     void setEq(std::vector<vc::EqBand> bands, double highpassHz, double sampleRate) {
         bands_ = std::move(bands);
         highpassHz_ = highpassHz;
@@ -53,6 +58,7 @@ private:
     double eqResponseAt(float freq) const;
 
     vc::SpectrumResult spectrum_;     // static whole-file average
+    vc::SpectrumResult processedSpectrum_; // static whole-file processed voice
     vc::SpectrumResult liveSpectrum_; // animated, while playing
     bool showLive_ = false;
     std::vector<vc::EqBand> bands_;
