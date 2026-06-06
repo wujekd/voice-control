@@ -6,15 +6,17 @@
 
 namespace {
 constexpr int kDefaultWindowWidth = 920;
+constexpr int kMinWindowWidth = kDefaultWindowWidth - 70; // floor before things vanish
 constexpr int kOuterMargin = 16;
-constexpr int kBottomBreathingRoom = 18;
+constexpr int kBottomBreathingRoom = 0;
+constexpr int kSpectrumHeight = 102;
 constexpr int kDefaultWindowHeight = kOuterMargin * 2
-    + (20 + 2 + 20 + 2 + 20 + 2 + 20 + 12 + 30 + 10) // meters
+    + (20 + 2 + 20 + 2 + 20 + 2 + 24 + 6)            // meters (matches resized())
     + (138 + 8)                                      // main controls
-    + (128 + 6)                                      // spectrum
+    + (kSpectrumHeight + 6)                          // spectrum
     + (216 + 8)                                      // timeline
     + (116 + 8)                                      // music controls
-    + (18 + 4 + 40)                                  // progress + status
+    + (18)                                           // progress
     + kBottomBreathingRoom;
 
 juce::File appDataDir() {
@@ -70,6 +72,18 @@ void setSliderIfPresent(juce::Slider& slider, const juce::DynamicObject* obj,
 void addNumber(juce::DynamicObject& obj, const juce::Identifier& id, double value) {
     obj.setProperty(id, value);
 }
+
+// DialogWindow that reports its own close (native close button / escape key)
+// back to the owner so the unique_ptr holding it can be released.
+class SettingsDialogWindow : public juce::DialogWindow {
+public:
+    SettingsDialogWindow(const juce::String& title, juce::Colour background)
+        : juce::DialogWindow(title, background, /*escapeKeyTriggersClose*/ true,
+                             /*addToDesktop*/ true) {}
+
+    std::function<void()> onClose;
+    void closeButtonPressed() override { if (onClose) onClose(); }
+};
 }
 
 void MainComponent::EncoderLookAndFeel::drawRotarySlider(
@@ -121,9 +135,9 @@ MainComponent::MainComponent() {
     juce::MenuBarModel::setMacMainMenu(this);
 #endif
 
-    settingsPanel_.setVisible(false);
-    addChildComponent(settingsPanel_);
-
+    // Audio-output and Pro controls below are configured here but not added as
+    // children of MainComponent; the settings window re-parents them into its
+    // tabs while open (see openSettings()).
     followSystemButton_.setToggleState(followSystemDefault_, juce::dontSendNotification);
     followSystemButton_.setWantsKeyboardFocus(false);
     followSystemButton_.onClick = [this] {
@@ -135,10 +149,8 @@ MainComponent::MainComponent() {
                 setOutputDevice(def);
         }
     };
-    addChildComponent(followSystemButton_);
 
     outputDeviceLabel_.setText("Output", juce::dontSendNotification);
-    addChildComponent(outputDeviceLabel_);
 
     outputDeviceBox_.setEnabled(!followSystemDefault_);
     outputDeviceBox_.onChange = [this] {
@@ -148,7 +160,6 @@ MainComponent::MainComponent() {
         if (name.isNotEmpty())
             setOutputDevice(name);
     };
-    addChildComponent(outputDeviceBox_);
 
     addAndMakeVisible(dropArea_);
     dropArea_.onFile = [this](const juce::File& f) {
@@ -205,7 +216,6 @@ MainComponent::MainComponent() {
         slider.setTextValueSuffix(suffix);
         configureEncoder(slider);
         slider.onValueChange = [this] { applyParamsLive(); };
-        addChildComponent(slider);
     };
 
     fastThresholdLabel_.setText("Peak Threshold", juce::dontSendNotification);
@@ -218,11 +228,6 @@ MainComponent::MainComponent() {
     deEssPresenceLabel_.setText("De-ess Presence", juce::dontSendNotification);
     deEssRatioLabel_.setText("De-ess Ratio", juce::dontSendNotification);
     deEssRangeLabel_.setText("De-ess Range", juce::dontSendNotification);
-    for (auto* label : { &fastThresholdLabel_, &fastRatioLabel_, &glueThresholdLabel_,
-                         &glueRatioLabel_, &targetPreChainLabel_, &deEssFreqLabel_,
-                         &deEssThresholdLabel_, &deEssPresenceLabel_, &deEssRatioLabel_,
-                         &deEssRangeLabel_ })
-        addChildComponent(label);
 
     const auto defaults = vc::fixedVoiceCleanupParams();
     configureProSlider(fastThresholdSlider_, -36.0, -6.0, 0.5, defaults.fastCompThresholdDb, " dB");
@@ -238,10 +243,6 @@ MainComponent::MainComponent() {
 
     resetProButton_.onClick = [this] { resetProDefaults(); };
     resetProButton_.setWantsKeyboardFocus(false);
-    addChildComponent(resetProButton_);
-
-    proPanel_.setVisible(false);
-    addChildComponent(proPanel_);
 
     playButton_.onClick = [this] { togglePlay(); };
     playButton_.setWantsKeyboardFocus(false);
@@ -256,6 +257,16 @@ MainComponent::MainComponent() {
 
     musicCaption_.setText("Backing Music", juce::dontSendNotification);
     addAndMakeVisible(musicCaption_);
+
+    // Small mute toggle at the start of the Backing Music section: silences the
+    // music channel so the voice can be auditioned alone.
+    musicMuteButton_.setClickingTogglesState(true);
+    musicMuteButton_.setTooltip("Mute backing music (voice only)");
+    musicMuteButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb24a4a));
+    musicMuteButton_.onClick = [this] {
+        player_.setMusicMuted(musicMuteButton_.getToggleState());
+    };
+    addAndMakeVisible(musicMuteButton_);
 
     // Add / remove / clip selection are now driven from the timeline. The
     // controls remain as hidden state-holders (the timeline still sets the
@@ -314,6 +325,17 @@ MainComponent::MainComponent() {
     // low end and highs survive while the clashing mids duck.
     duckCaption_.setText("Ducking", juce::dontSendNotification);
     addAndMakeVisible(duckCaption_);
+
+    // Mirror of the Mute button on the ducking side: bypasses the sidechain
+    // ducker so the music keeps its full level.
+    duckBypassButton_.setClickingTogglesState(true);
+    duckBypassButton_.setTooltip("Bypass ducking (music at full level)");
+    duckBypassButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb24a4a));
+    duckBypassButton_.onClick = [this] {
+        player_.setDuckBypassed(duckBypassButton_.getToggleState());
+    };
+    addAndMakeVisible(duckBypassButton_);
+
     duckLookAheadLabel_.setText("Look-ahead", juce::dontSendNotification);
     duckReductionLabel_.setText("Reduction", juce::dontSendNotification);
     duckFilterLabel_.setText("Mid focus", juce::dontSendNotification);
@@ -337,6 +359,18 @@ MainComponent::MainComponent() {
     player_.setDuckLookAheadMs(duckLookAheadSlider_.getValue());
     player_.setDuckReductionDb(duckReductionSlider_.getValue());
     player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0);
+
+    // The backing-music section is busy, so its encoders are made narrower than
+    // the main ones: smaller labels and tighter value boxes to claw back width.
+    for (auto* label : { &musicMasterVolumeLabel_, &musicVolumeLabel_,
+                         &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ }) {
+        label->setFont(juce::Font(juce::FontOptions(12.0f)));
+        label->setJustificationType(juce::Justification::centred);
+    }
+    for (auto* slider : { &musicMasterVolumeSlider_, &musicVolumeSlider_,
+                          &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
+        slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 66, 20);
+
     addAndMakeVisible(duckView_);
 
     // Start, fade in and fade out are now adjusted on the timeline; these
@@ -408,10 +442,8 @@ MainComponent::MainComponent() {
     exportButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(exportButton_);
 
-    statusLabel_.setJustificationType(juce::Justification::centredLeft);
-    statusLabel_.setText("Drop a video or audio file to begin.", juce::dontSendNotification);
-    addAndMakeVisible(statusLabel_);
-
+    // The bottom status line was redundant with the progress bar / busy state,
+    // so statusLabel_ is no longer shown (setText calls below are harmless).
     addAndMakeVisible(compMeter_);
     addAndMakeVisible(deEssMeter_);
     addAndMakeVisible(limiterMeter_);
@@ -443,6 +475,9 @@ MainComponent::MainComponent() {
                                     * static_cast<float>(i) / static_cast<float>(fftSize - 1));
     liveResult_.fftSize = fftSize;
     liveResult_.binDb.assign(static_cast<std::size_t>(fftSize / 2), -120.0f);
+    musicDb_.assign(static_cast<std::size_t>(fftSize / 2), -120.0f);
+    musicResult_.fftSize = fftSize;
+    musicResult_.binDb.assign(static_cast<std::size_t>(fftSize / 2), -120.0f);
 
     deviceManager_.initialiseWithDefaultDevices(0, 2);
     sourcePlayer_.setSource(&player_);
@@ -463,6 +498,11 @@ MainComponent::~MainComponent() {
     if (juce::MenuBarModel::getMacMainMenu() == this)
         juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
+
+    // Tear down the settings window first: it re-parents controls that are
+    // members of this component, so it must release them before they are
+    // destroyed below.
+    settingsWindow_.reset();
 
     for (auto* s : { &toneSlider_, &noiseReductionSlider_, &strengthSlider_,
                      &fastThresholdSlider_, &fastRatioSlider_, &glueThresholdSlider_,
@@ -754,7 +794,10 @@ void MainComponent::updateMusicTimeline() {
         engine_.hasAudio() ? &engine_.voiceWaveformPeaks() : nullptr,
         engine_.hasAudio() && !engine_.processedVoiceWaveformPeaks().empty()
             ? &engine_.processedVoiceWaveformPeaks()
-            : nullptr);
+            : nullptr,
+        engine_.waveformDisplayGain());
+    musicTimeline_.setVoiceNoiseReduction(
+        static_cast<float>(vc::noiseReductionControlToBlend(noiseReductionSlider_.getValue() / 100.0)));
     musicTimeline_.setClips(&engine_.musicClips(), musicClipBox_.getSelectedId() - 1);
 }
 
@@ -773,48 +816,86 @@ void MainComponent::resetProDefaults() {
     applyParamsLive();
 }
 
-void MainComponent::setSettingsPanelVisible(bool visible) {
-    settingsPanelVisible_ = visible;
-    settingsPanel_.setVisible(settingsPanelVisible_);
-    followSystemButton_.setVisible(settingsPanelVisible_);
-    outputDeviceLabel_.setVisible(settingsPanelVisible_);
-    outputDeviceBox_.setVisible(settingsPanelVisible_);
-    if (settingsPanelVisible_) {
-        if (auto* type = deviceManager_.getCurrentDeviceTypeObject())
-            type->scanForDevices();
-        refreshOutputDeviceList();
+void MainComponent::parentHierarchyChanged() {
+    if (findParentComponentOfClass<juce::ResizableWindow>() == nullptr)
+        return;
+    // Defer: during construction the window's constrainer isn't installed and
+    // its final size isn't known until setContentOwned/setResizable finish.
+    juce::Component::SafePointer<MainComponent> self(this);
+    juce::MessageManager::callAsync([self] {
+        if (self != nullptr)
+            self->applyWindowConstraints();
+    });
+}
+
+void MainComponent::applyWindowConstraints() {
+    auto* window = findParentComponentOfClass<juce::ResizableWindow>();
+    if (window == nullptr)
+        return;
+    auto* constrainer = window->getConstrainer();
+    if (constrainer == nullptr)
+        return;
+
+    // The main window now has a fixed content height (audio + pro controls live
+    // in the separate settings window).
+    const int contentHeight = kDefaultWindowHeight;
+
+    // Translate content size into window size (native title bar adds chrome).
+    const int chromeH = window->getHeight() - getHeight();
+    const int chromeW = window->getWidth() - getWidth();
+    const int winH = contentHeight + chromeH;
+    const int minWinW = kMinWindowWidth + chromeW;
+
+    // Equal min/max height => the user cannot drag the height; width stays free
+    // down to the floor.
+    constrainer->setSizeLimits(minWinW, winH, 4096, winH);
+    window->setSize(window->getWidth(), winH);
+}
+
+void MainComponent::openSettings() {
+    if (settingsWindow_ != nullptr) {
+        settingsWindow_->toFront(true);
+        return;
     }
-    resized();
+
+    // Refresh the device list before the Audio tab shows it.
+    if (auto* type = deviceManager_.getCurrentDeviceTypeObject())
+        type->scanForDevices();
+    refreshOutputDeviceList();
+
+    auto content = std::make_unique<SettingsComponent>();
+    content->setAudioControls(followSystemButton_, outputDeviceLabel_, outputDeviceBox_);
+    content->setProControls({ { &fastThresholdLabel_, &fastThresholdSlider_ },
+                              { &fastRatioLabel_, &fastRatioSlider_ },
+                              { &glueThresholdLabel_, &glueThresholdSlider_ },
+                              { &glueRatioLabel_, &glueRatioSlider_ },
+                              { &targetPreChainLabel_, &targetPreChainSlider_ },
+                              { &deEssFreqLabel_, &deEssFreqSlider_ },
+                              { &deEssThresholdLabel_, &deEssThresholdSlider_ },
+                              { &deEssPresenceLabel_, &deEssPresenceSlider_ },
+                              { &deEssRatioLabel_, &deEssRatioSlider_ },
+                              { &deEssRangeLabel_, &deEssRangeSlider_ } },
+                            resetProButton_);
+
+    auto window = std::make_unique<SettingsDialogWindow>("Settings", juce::Colour(0xff2b2f36));
+    window->onClose = [this] { closeSettings(); };
+    window->setUsingNativeTitleBar(true);
+    window->setContentOwned(content.release(), true);
+    window->centreAroundComponent(this, SettingsComponent::kWidth, SettingsComponent::kHeight);
+    window->setVisible(true);
+    settingsWindow_.reset(window.release());
     updateMainMenu();
 }
 
-void MainComponent::setProPanelVisible(bool visible) {
-    proPanelVisible_ = visible;
-    proPanel_.setVisible(proPanelVisible_);
-    for (auto* c : { static_cast<juce::Component*>(&fastThresholdLabel_),
-                     static_cast<juce::Component*>(&fastThresholdSlider_),
-                     static_cast<juce::Component*>(&fastRatioLabel_),
-                     static_cast<juce::Component*>(&fastRatioSlider_),
-                     static_cast<juce::Component*>(&glueThresholdLabel_),
-                     static_cast<juce::Component*>(&glueThresholdSlider_),
-                     static_cast<juce::Component*>(&glueRatioLabel_),
-                     static_cast<juce::Component*>(&glueRatioSlider_),
-                     static_cast<juce::Component*>(&targetPreChainLabel_),
-                     static_cast<juce::Component*>(&targetPreChainSlider_),
-                     static_cast<juce::Component*>(&deEssFreqLabel_),
-                     static_cast<juce::Component*>(&deEssFreqSlider_),
-                     static_cast<juce::Component*>(&deEssThresholdLabel_),
-                     static_cast<juce::Component*>(&deEssThresholdSlider_),
-                     static_cast<juce::Component*>(&deEssPresenceLabel_),
-                     static_cast<juce::Component*>(&deEssPresenceSlider_),
-                     static_cast<juce::Component*>(&deEssRatioLabel_),
-                     static_cast<juce::Component*>(&deEssRatioSlider_),
-                     static_cast<juce::Component*>(&deEssRangeLabel_),
-                     static_cast<juce::Component*>(&deEssRangeSlider_),
-                     static_cast<juce::Component*>(&resetProButton_) })
-        c->setVisible(proPanelVisible_);
-    resized();
-    updateMainMenu();
+void MainComponent::closeSettings() {
+    // Defer destruction: this fires from inside the dialog (its own close button
+    // or the escape key), so the window must outlive the current call stack.
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
+        if (safe != nullptr) {
+            safe->settingsWindow_.reset();
+            safe->updateMainMenu();
+        }
+    });
 }
 
 void MainComponent::updateMainMenu() {
@@ -835,8 +916,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
         menu.addSeparator();
         menu.addItem(saveProjectMenuId, "Save Project");
     } else if (topLevelMenuIndex == 1) {
-        menu.addItem(toggleSettingsMenuId, "Audio Output Settings", true, settingsPanelVisible_);
-        menu.addItem(toggleProMenuId, "Pro Controls", true, proPanelVisible_);
+        menu.addItem(openSettingsMenuId, "Settings...", true, settingsWindow_ != nullptr);
     }
     return menu;
 }
@@ -852,11 +932,8 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
         case saveProjectMenuId:
             saveCurrentProject();
             break;
-        case toggleSettingsMenuId:
-            setSettingsPanelVisible(!settingsPanelVisible_);
-            break;
-        case toggleProMenuId:
-            setProPanelVisible(!proPanelVisible_);
+        case openSettingsMenuId:
+            openSettings();
             break;
         default:
             break;
@@ -889,11 +966,6 @@ juce::var MainComponent::makeProjectState() const {
     addNumber(*controls, "duckBlend", duckFilterSlider_.getValue());
     root->setProperty("controls", juce::var(controls.release()));
 
-    auto view = std::make_unique<juce::DynamicObject>();
-    view->setProperty("settingsPanelVisible", settingsPanelVisible_);
-    view->setProperty("proPanelVisible", proPanelVisible_);
-    root->setProperty("view", juce::var(view.release()));
-
     juce::Array<juce::var> musicClips;
     const auto& clips = engine_.musicClips();
     musicClips.ensureStorageAllocated(static_cast<int>(clips.size()));
@@ -922,7 +994,6 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
         return false;
 
     auto* controls = root->getProperty("controls").getDynamicObject();
-    auto* view = root->getProperty("view").getDynamicObject();
 
     player_.stop();
     player_.clearSources();
@@ -983,10 +1054,6 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
         }
     }
 
-    setSettingsPanelVisible(static_cast<bool>(numberProperty(view, "settingsPanelVisible",
-                                                            settingsPanelVisible_ ? 1.0 : 0.0)));
-    setProPanelVisible(static_cast<bool>(numberProperty(view, "proPanelVisible",
-                                                       proPanelVisible_ ? 1.0 : 0.0)));
     const auto sourcePath = stringProperty(root, "sourcePath");
     if (sourcePath.isNotEmpty()) {
         const juce::File source(sourcePath);
@@ -1219,7 +1286,7 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster*) {
     if (updatingDevice_)
         return;
 
-    if (settingsPanelVisible_)
+    if (settingsWindow_ != nullptr)
         refreshOutputDeviceList();
 
     if (followSystemDefault_) {
@@ -1312,6 +1379,30 @@ void MainComponent::updateLiveSpectrum() {
     spectrumView_.setLiveSpectrum(liveResult_);
 }
 
+void MainComponent::updateMusicSpectrum() {
+    const int fftSize = 1 << kFftOrder;
+    player_.readMusicAnalysisBlock(analysisScratch_.data(), fftSize);
+
+    for (int i = 0; i < fftSize; ++i)
+        fftData_[static_cast<std::size_t>(i)] =
+            analysisScratch_[static_cast<std::size_t>(i)] * fftWindow_[static_cast<std::size_t>(i)];
+    std::fill(fftData_.begin() + fftSize, fftData_.end(), 0.0f);
+
+    fft_.performFrequencyOnlyForwardTransform(fftData_.data());
+
+    const int half = fftSize / 2;
+    for (int k = 0; k < half; ++k) {
+        const float mag = fftData_[static_cast<std::size_t>(k)];
+        const float db = 20.0f * std::log10(mag + 1e-9f);
+        float& s = musicDb_[static_cast<std::size_t>(k)];
+        s += (db > s ? 0.5f : 0.2f) * (db - s); // fast rise, slower fall
+        musicResult_.binDb[static_cast<std::size_t>(k)] = s;
+    }
+    musicResult_.sampleRate = currentDeviceRate();
+    musicResult_.valid = true;
+    duckView_.setMusicSpectrum(musicResult_);
+}
+
 void MainComponent::applyParamsLive() {
     if (!engine_.hasAudio()) return;
     const auto params = buildParams();
@@ -1324,6 +1415,7 @@ void MainComponent::applyParamsLive() {
         player_.setInputLoudness(loudnessRef);
     player_.setNoiseReductionAmount(params.noiseReductionAmount);
     player_.setParams(params);             // instant: sound changes now
+    musicTimeline_.setVoiceNoiseReduction(static_cast<float>(params.noiseReductionAmount));
     updateEqView();
     markProjectDirty();
 }
@@ -1671,6 +1763,10 @@ void MainComponent::timerCallback() {
     duckView_.setMusicWaveform(musicWave.data(), static_cast<int>(musicWave.size()));
     duckView_.setDuckState(playing ? player_.musicDuckReductionDb() : 0.0f,
                            static_cast<float>(duckFilterSlider_.getValue() / 100.0));
+    if (playing)
+        updateMusicSpectrum();
+    else
+        duckView_.setMusicSpectrum({});
 
     // Animate the spectrum to the playing audio; revert to the average when idle.
     if (playing)
@@ -1720,18 +1816,6 @@ void MainComponent::paint(juce::Graphics& g) {
 void MainComponent::resized() {
     auto r = getLocalBounds().reduced(16);
 
-    if (settingsPanelVisible_) {
-        auto sArea = r.removeFromTop(78);
-        settingsPanel_.setBounds(sArea);
-        sArea.reduce(10, 18);
-        followSystemButton_.setBounds(sArea.removeFromTop(24));
-        sArea.removeFromTop(4);
-        auto devRow = sArea.removeFromTop(24);
-        outputDeviceLabel_.setBounds(devRow.removeFromLeft(100));
-        outputDeviceBox_.setBounds(devRow);
-        r.removeFromTop(8);
-    }
-
     // Live gain-reduction meters.
     compMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(2);
@@ -1740,10 +1824,11 @@ void MainComponent::resized() {
     limiterMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(2);
     vuMeter_.setBounds(r.removeFromTop(24));
-    r.removeFromTop(10);
+    r.removeFromTop(6);
 
-    auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider) {
-        label.setBounds(area.removeFromTop(20));
+    auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider,
+                           int labelHeight = 20) {
+        label.setBounds(area.removeFromTop(labelHeight));
         slider.setBounds(area);
     };
 
@@ -1780,7 +1865,7 @@ void MainComponent::resized() {
     placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
     r.removeFromTop(8);
 
-    spectrumView_.setBounds(r.removeFromTop(128));
+    spectrumView_.setBounds(r.removeFromTop(kSpectrumHeight));
     r.removeFromTop(6);
 
     auto timelineBounds = r.removeFromTop(216);
@@ -1794,60 +1879,46 @@ void MainComponent::resized() {
     dropArea_.toFront(false);
     r.removeFromTop(8);
 
-    // Add / remove / clip selection moved to the timeline. The left of this row
-    // holds the backing-music volume knobs; the right holds the background
-    // ducking section.
+    // Backing-music section, laid out columns-first: a left column of music
+    // volume controls, a right column of ducking controls, and a middle column
+    // that gives the duck/oscilloscope screen the section's full height (caption
+    // band included) instead of leaving dead space above it.
     auto musicArea = r.removeFromTop(116);
-    auto captionRow = musicArea.removeFromTop(20);
-    auto musicRow = musicArea;
-    constexpr int knobWidth = 96;
+    constexpr int knobWidth = 80;
+    constexpr int labelHeight = 16; // compact labels for this section
+    constexpr int captionH = 20;
 
-    auto volumeArea = musicRow.removeFromLeft(knobWidth * 2);
-    musicCaption_.setBounds(captionRow.removeFromLeft(knobWidth * 2));
-    placeEncoder(volumeArea.removeFromLeft(knobWidth).reduced(4, 0),
-                 musicMasterVolumeLabel_, musicMasterVolumeSlider_);
-    placeEncoder(volumeArea.reduced(4, 0),
-                 musicVolumeLabel_, musicVolumeSlider_);
+    auto leftCol = musicArea.removeFromLeft(knobWidth * 2);
+    auto rightCol = musicArea.removeFromRight(knobWidth * 3);
+    auto screenCol = musicArea; // full-height middle column for the screen
 
-    auto duckArea = musicRow.removeFromRight(knobWidth * 3);
-    duckCaption_.setBounds(captionRow.removeFromRight(knobWidth * 3));
-    placeEncoder(duckArea.removeFromLeft(knobWidth).reduced(4, 0),
-                 duckLookAheadLabel_, duckLookAheadSlider_);
-    placeEncoder(duckArea.removeFromLeft(knobWidth).reduced(4, 0),
-                 duckReductionLabel_, duckReductionSlider_);
-    placeEncoder(duckArea.reduced(4, 0),
-                 duckFilterLabel_, duckFilterSlider_);
-    // The leftover middle band holds the music-output / duck display.
-    duckView_.setBounds(musicRow.reduced(8, 4));
+    // Left column: "Backing Music" + Mute on top, two volume knobs below.
+    auto leftCaption = leftCol.removeFromTop(captionH);
+    musicMuteButton_.setBounds(leftCaption.removeFromLeft(50).withSizeKeepingCentre(48, 18));
+    leftCaption.removeFromLeft(6);
+    musicCaption_.setBounds(leftCaption);
+    placeEncoder(leftCol.removeFromLeft(knobWidth).reduced(4, 0),
+                 musicMasterVolumeLabel_, musicMasterVolumeSlider_, labelHeight);
+    placeEncoder(leftCol.reduced(4, 0),
+                 musicVolumeLabel_, musicVolumeSlider_, labelHeight);
+
+    // Right column: Bypass mirrors Mute on the far side; "Ducking" + 3 knobs.
+    auto rightCaption = rightCol.removeFromTop(captionH);
+    duckBypassButton_.setBounds(rightCaption.removeFromRight(58).withSizeKeepingCentre(56, 18));
+    rightCaption.removeFromRight(6);
+    duckCaption_.setBounds(rightCaption);
+    placeEncoder(rightCol.removeFromLeft(knobWidth).reduced(4, 0),
+                 duckLookAheadLabel_, duckLookAheadSlider_, labelHeight);
+    placeEncoder(rightCol.removeFromLeft(knobWidth).reduced(4, 0),
+                 duckReductionLabel_, duckReductionSlider_, labelHeight);
+    placeEncoder(rightCol.reduced(4, 0),
+                 duckFilterLabel_, duckFilterSlider_, labelHeight);
+
+    // Middle column: the screen spans the full section height.
+    duckView_.setBounds(screenCol.reduced(8, 4));
     r.removeFromTop(8);
 
-    if (proPanelVisible_) {
-        auto proArea = r.removeFromTop(286);
-        proPanel_.setBounds(proArea);
-        proArea.reduce(10, 18);
-
-        auto placePro = [&proArea](juce::Label& leftLabel, juce::Slider& leftSlider,
-                                   juce::Label& rightLabel, juce::Slider& rightSlider) {
-            auto row = proArea.removeFromTop(50);
-            auto left = row.removeFromLeft(row.getWidth() / 2).reduced(4, 0);
-            auto right = row.reduced(4, 0);
-            leftLabel.setBounds(left.removeFromLeft(118).reduced(0, 10));
-            leftSlider.setBounds(left);
-            rightLabel.setBounds(right.removeFromLeft(118).reduced(0, 10));
-            rightSlider.setBounds(right);
-            proArea.removeFromTop(4);
-        };
-        placePro(fastThresholdLabel_, fastThresholdSlider_, fastRatioLabel_, fastRatioSlider_);
-        placePro(glueThresholdLabel_, glueThresholdSlider_, glueRatioLabel_, glueRatioSlider_);
-        placePro(targetPreChainLabel_, targetPreChainSlider_, deEssFreqLabel_, deEssFreqSlider_);
-        proArea.removeFromTop(4);
-        placePro(deEssThresholdLabel_, deEssThresholdSlider_, deEssPresenceLabel_, deEssPresenceSlider_);
-        placePro(deEssRatioLabel_, deEssRatioSlider_, deEssRangeLabel_, deEssRangeSlider_);
-        resetProButton_.setBounds(proArea.removeFromTop(28).removeFromRight(90));
-        r.removeFromTop(8);
-    }
-
+    // The Pro controls now live in the settings window (see SettingsComponent),
+    // so resized() no longer lays them out here.
     progressBar_.setBounds(r.removeFromTop(18));
-    r.removeFromTop(4);
-    statusLabel_.setBounds(r.removeFromTop(40));
 }

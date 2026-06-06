@@ -97,6 +97,7 @@ if(VC_BUILD_APP)
         desktop-juce/MusicTimeline.cpp
         desktop-juce/PreviewPlayer.cpp
         desktop-juce/ProcessingEngine.cpp
+        desktop-juce/SettingsComponent.cpp
         desktop-juce/SpectrumView.cpp)
 
     target_compile_definitions(voice-control-app PRIVATE

@@ -12,6 +12,7 @@
 #include "ProcessingEngine.h"
 #include "ProjectManagerComponent.h"
 #include "Presets.h" // vc::Preset, vc::Tone, vc::ChainParams
+#include "SettingsComponent.h"
 #include "SpectrumView.h"
 
 #include <array>
@@ -36,15 +37,18 @@ public:
 
     void paint(juce::Graphics& g) override;
     void resized() override;
+    void parentHierarchyChanged() override;
     bool keyPressed(const juce::KeyPress& key) override;
 
 private:
+    // Lock the host window's height (non-resizable vertically) and floor its
+    // width so controls never vanish.
+    void applyWindowConstraints();
     enum MenuItemIds {
         newProjectMenuId = 1,
         openProjectManagerMenuId = 2,
         saveProjectMenuId = 3,
-        toggleSettingsMenuId = 20,
-        toggleProMenuId = 21,
+        openSettingsMenuId = 20,
     };
 
     struct MusicUndoState;
@@ -79,6 +83,7 @@ private:
     void updateListenButton();
     void updateEqView();
     void updateLiveSpectrum();
+    void updateMusicSpectrum();
     void requestProcessedSpectrumUpdate();
     void startProcessedSpectrumUpdateIfNeeded();
     void newProject();
@@ -99,8 +104,8 @@ private:
     juce::var makeProjectState() const;
     bool applyProjectState(const juce::var& state, bool fromAutosave);
     void restorePendingMusicClipsAfterVoiceLoad(const juce::File& voiceFile, const juce::String& loadedMessage);
-    void setSettingsPanelVisible(bool visible);
-    void setProPanelVisible(bool visible);
+    void openSettings();
+    void closeSettings();
     void updateMainMenu();
     double currentDeviceRate() const;
     double currentIntensity() const;
@@ -131,12 +136,14 @@ private:
 
     FileDropComponent dropArea_;
     SpectrumView spectrumView_;
-    juce::GroupComponent settingsPanel_ { "settingsPanel", "Audio Output" };
+    // Audio-output controls. They live on MainComponent (so device handling and
+    // project state stay here) but are re-parented into the settings window's
+    // "Audio" tab while it is open.
     juce::ToggleButton followSystemButton_ { "Follow system output" };
     juce::Label outputDeviceLabel_;
     juce::ComboBox outputDeviceBox_;
     std::unique_ptr<juce::DialogWindow> projectManagerWindow_;
-    bool settingsPanelVisible_ = false;
+    std::unique_ptr<juce::DialogWindow> settingsWindow_;
     bool followSystemDefault_ = true;
     bool updatingDevice_ = false; // re-entrancy guard for device changes
     EncoderLookAndFeel encoderLookAndFeel_;
@@ -144,7 +151,7 @@ private:
     juce::Slider toneSlider_;
     juce::Slider noiseReductionSlider_;
     juce::Slider strengthSlider_;
-    juce::GroupComponent proPanel_ { "proPanel", "Pro" };
+    // Pro controls: re-parented into the settings window's "Pro" tab while open.
     juce::Label fastThresholdLabel_, fastRatioLabel_, glueThresholdLabel_, glueRatioLabel_, targetPreChainLabel_;
     juce::Slider fastThresholdSlider_, fastRatioSlider_, glueThresholdSlider_, glueRatioSlider_, targetPreChainSlider_;
     juce::Label deEssFreqLabel_, deEssThresholdLabel_, deEssPresenceLabel_, deEssRatioLabel_, deEssRangeLabel_;
@@ -155,11 +162,13 @@ private:
     juce::TextButton addMusicButton_ { "Add music..." };
     juce::TextButton removeMusicButton_ { "Remove" };
     juce::ComboBox musicClipBox_;
+    juce::TextButton musicMuteButton_ { "Mute" }; // mute the backing-music channel
     juce::Label musicCaption_, musicStartLabel_, musicMasterVolumeLabel_, musicVolumeLabel_, musicFadeInLabel_, musicFadeOutLabel_;
     juce::Slider musicStartSlider_, musicMasterVolumeSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
     // Background ducking: voice sidechains the backing music. Look-ahead +
     // reduction behave like a sidechain compressor; "Mid focus" blends from
     // full-band ducking toward mid-band-only (dynamic-EQ-style) ducking.
+    juce::TextButton duckBypassButton_ { "Bypass" }; // bypass the sidechain ducker
     juce::Label duckCaption_, duckLookAheadLabel_, duckReductionLabel_, duckFilterLabel_;
     juce::Slider duckLookAheadSlider_, duckReductionSlider_, duckFilterSlider_;
     DuckView duckView_;
@@ -191,8 +200,6 @@ private:
     juce::TextButton exportButton_ { "Export" };
     juce::Label statusLabel_;
 
-    bool proPanelVisible_ = false;
-
     CompMeter compMeter_ { "Comp", 12.0f, juce::Colour(0xff5aa0ff), juce::Colour(0xff5aa0ff) };
     GrMeter deEssMeter_ { "De-ess", 10.0f, juce::Colour(0xffffc14d) };
     GrMeter limiterMeter_ { "Limiter", 5.0f, juce::Colour(0xffff5d5d) };
@@ -221,6 +228,8 @@ private:
     std::vector<float> analysisScratch_; // fftSize
     std::vector<float> liveDb_;      // fftSize/2, smoothed
     vc::SpectrumResult liveResult_;
+    std::vector<float> musicDb_;     // fftSize/2, smoothed (backing music)
+    vc::SpectrumResult musicResult_;
 
     // Measured once during file analysis and interpolated for live preview.
     double intensityMinLoudnessRef_ = 0.0;
