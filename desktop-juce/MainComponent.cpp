@@ -1226,34 +1226,32 @@ void MainComponent::resized() {
 
     auto encoderRow = r.removeFromTop(138);
 
-    // Five elements laid out left-to-right with one consistent gap so the space
-    // between the buttons and the encoders matches the gaps between encoders:
-    // play/bypass column, Intensity, Tone, Noise Reduction, Export.
+    // Play/bypass hug the left edge and Export the right edge (respecting only
+    // the shared outer margin); the three encoders are then spread evenly across
+    // the space that remains in between.
     constexpr int buttonColWidth = 108;
     constexpr int encoderWidth = 156;
     constexpr int exportWidth = 104;
-    constexpr int elementGap = 42;
-    const int groupWidth = buttonColWidth + exportWidth + encoderWidth * 3 + elementGap * 4;
-    auto group = encoderRow.withSizeKeepingCentre(
-        juce::jmin(groupWidth, encoderRow.getWidth()), encoderRow.getHeight());
 
-    auto mainTransport = group.removeFromLeft(buttonColWidth).reduced(2, 4);
+    auto mainTransport = encoderRow.removeFromLeft(buttonColWidth).reduced(2, 4);
     playButton_.setBounds(mainTransport.removeFromTop(82));
     mainTransport.removeFromTop(8);
     listenButton_.setBounds(mainTransport.removeFromTop(36));
-    group.removeFromLeft(elementGap);
 
-    // Export sits on the far right and spans the full combined height of the
+    // Export sits flush right and spans the full combined height of the
     // play + bypass column.
-    auto exportArea = group.removeFromRight(exportWidth).reduced(2, 4);
+    auto exportArea = encoderRow.removeFromRight(exportWidth).reduced(2, 4);
     exportButton_.setBounds(exportArea);
-    group.removeFromRight(elementGap);
 
-    auto strengthArea = group.removeFromLeft(encoderWidth);
-    group.removeFromLeft(elementGap);
-    auto toneArea = group.removeFromLeft(encoderWidth);
-    group.removeFromLeft(elementGap);
-    auto noiseArea = group.removeFromLeft(encoderWidth);
+    // Distribute the three encoders evenly within the remaining middle band:
+    // four equal gaps (before, between, between, after).
+    const int encoderGap = juce::jmax(0, (encoderRow.getWidth() - encoderWidth * 3) / 4);
+    encoderRow.removeFromLeft(encoderGap);
+    auto strengthArea = encoderRow.removeFromLeft(encoderWidth);
+    encoderRow.removeFromLeft(encoderGap);
+    auto toneArea = encoderRow.removeFromLeft(encoderWidth);
+    encoderRow.removeFromLeft(encoderGap);
+    auto noiseArea = encoderRow.removeFromLeft(encoderWidth);
     placeEncoder(strengthArea, strengthCaption_, strengthSlider_);
     placeEncoder(toneArea, toneCaption_, toneSlider_);
     placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);

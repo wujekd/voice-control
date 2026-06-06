@@ -5,7 +5,7 @@ const juce::StringArray kMediaExtensions {
     // video
     "mp4", "mov", "m4v", "mkv", "avi", "webm",
     // audio
-    "wav", "mp3", "m4a", "aac", "flac", "aiff", "aif", "ogg"
+    "wav", "mp3", "m4a", "aac", "flac", "aiff", "aif", "ogg", "opus"
 };
 const juce::String kDefaultStatus { "Add voice audio or video\nDrag here, or click to browse" };
 }
@@ -60,7 +60,7 @@ void FileDropComponent::paint(juce::Graphics& g) {
 void FileDropComponent::mouseUp(const juce::MouseEvent&) {
     chooser_ = std::make_unique<juce::FileChooser>(
         "Choose a video or audio file", juce::File(),
-        "*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.wav;*.mp3;*.m4a;*.aac;*.flac;*.aiff;*.aif;*.ogg");
+        "*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.wav;*.mp3;*.m4a;*.aac;*.flac;*.aiff;*.aif;*.ogg;*.opus");
     chooser_->launchAsync(juce::FileBrowserComponent::openMode
                               | juce::FileBrowserComponent::canSelectFiles,
                           [this](const juce::FileChooser& fc) { deliver(fc.getResult()); });
