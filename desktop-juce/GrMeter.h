@@ -101,14 +101,14 @@ public:
         const float peakFrac = juce::jlimit(0.0f, 1.0f, (peakDb_ - minDb_) / span);
         const float rmsFrac = juce::jlimit(0.0f, 1.0f, (rmsDb_ - minDb_) / span);
 
-        // Peak layer (lighter green), behind.
+        // Peak layer (grayed-out green, like the encoder's inactive arc), behind.
         if (peakFrac * track.getWidth() > 1.0f) {
-            g.setColour(kPeakGreen);
+            g.setColour(kGreen.withAlpha(0.24f));
             g.fillRoundedRectangle(track.withWidth(track.getWidth() * peakFrac), 3.0f);
         }
-        // RMS layer (deep green), in front.
+        // RMS layer (active encoder green), in front.
         if (rmsFrac * track.getWidth() > 1.0f) {
-            g.setColour(kRmsGreen);
+            g.setColour(kGreen.withAlpha(0.95f));
             g.fillRoundedRectangle(track.withWidth(track.getWidth() * rmsFrac), 3.0f);
         }
 
@@ -119,9 +119,8 @@ public:
     }
 
 private:
-    // Deep green matches the encoder/potentiometer fill; peak is a lighter tint.
-    inline static const juce::Colour kRmsGreen { 0xff6ee07a };
-    inline static const juce::Colour kPeakGreen { 0xffaef0b4 };
+    // Same green as the encoder: RMS uses the active fill, peak the grayed-out tint.
+    inline static const juce::Colour kGreen { 0xff6ee07a };
 
     juce::String label_;
     float minDb_ = -60.0f;

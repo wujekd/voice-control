@@ -59,6 +59,7 @@ private:
     void syncMusicControlsFromSelection();
     void applySelectedMusicClipControls();
     void applySelectedMusicClipVolume();
+    void applyMusicMasterVolume();
     void pushMusicUndoState();
     void beginMusicUndoGesture();
     void endMusicUndoGesture();
@@ -126,8 +127,11 @@ private:
     juce::TextButton addMusicButton_ { "Add music..." };
     juce::TextButton removeMusicButton_ { "Remove" };
     juce::ComboBox musicClipBox_;
-    juce::Label musicCaption_, musicStartLabel_, musicVolumeLabel_, musicFadeInLabel_, musicFadeOutLabel_;
-    juce::Slider musicStartSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
+    juce::Label musicCaption_, musicStartLabel_, musicMasterVolumeLabel_, musicVolumeLabel_, musicFadeInLabel_, musicFadeOutLabel_;
+    juce::Slider musicStartSlider_, musicMasterVolumeSlider_, musicVolumeSlider_, musicFadeInSlider_, musicFadeOutSlider_;
+    // Background ducking (sketch): knobs only for now, not yet wired to DSP.
+    juce::Label duckCaption_, duckLookAheadLabel_, duckReductionLabel_, duckFilterLabel_;
+    juce::Slider duckLookAheadSlider_, duckReductionSlider_, duckFilterSlider_;
     MusicTimeline musicTimeline_;
     bool musicClipDragActive_ = false;
     bool musicUndoGestureActive_ = false;
@@ -142,7 +146,7 @@ private:
     std::vector<std::pair<double, double>> musicClipFadeSnapshot_;
     void applyMusicClipOverlapCrossfades(int draggedIndex);
     bool analyzingMedia_ = false;
-    juce::TextButton exportButton_ { "Export video..." };
+    juce::TextButton exportButton_ { "Export" };
     juce::Label statusLabel_;
 
     bool proPanelVisible_ = false;
@@ -151,7 +155,7 @@ private:
     GrMeter glueCompMeter_ { "Glue Comp", 10.0f, juce::Colour(0xffa6e22e) };
     GrMeter deEssMeter_ { "De-ess", 10.0f, juce::Colour(0xffffc14d) };
     GrMeter limiterMeter_ { "Limiter", 10.0f, juce::Colour(0xffff5d5d) };
-    VuMeter vuMeter_ { "VU" };
+    VuMeter vuMeter_ { "Output" };
 
     double progress_ = 0.0;
     juce::ProgressBar progressBar_ { progress_ };
