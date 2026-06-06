@@ -3,6 +3,7 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 
 #include "AudioBuffer.h"
+#include "Ducker.h"
 #include "LiveVoiceChain.h"
 #include "MusicClip.h"
 #include "Presets.h"
@@ -30,6 +31,22 @@ public:
     void setMusicClips(const std::vector<MusicClip>& clips);
     void setMusicClipGainDb(int index, double gainDb);
     void setMusicMasterGainDb(double gainDb);
+
+    // Background ducking: the voice sidechains the backing music. Look-ahead in
+    // ms, max reduction in dB, blend 0 (full-band) .. 1 (mid band only).
+    void setDuckLookAheadMs(double ms) {
+        duckLookAheadMs_.store(static_cast<float>(juce::jlimit(0.0, 50.0, ms)), std::memory_order_relaxed);
+    }
+    void setDuckReductionDb(double db) {
+        duckMaxReductionDb_.store(static_cast<float>(juce::jlimit(0.0, 24.0, db)), std::memory_order_relaxed);
+    }
+    void setDuckBlend(double blend01) {
+        duckBlend_.store(static_cast<float>(juce::jlimit(0.0, 1.0, blend01)), std::memory_order_relaxed);
+    }
+    // Current smoothed music gain reduction (positive dB) for the UI display.
+    float musicDuckReductionDb() const { return musicDuckReductionDb_.load(std::memory_order_relaxed); }
+    // Latest post-duck music output (mono) for the DuckView waveform.
+    void readMusicAnalysisBlock(float* dest, int n) const;
     void setMutedMusicClipIndex(int index) { mutedMusicClipIndex_.store(index, std::memory_order_relaxed); }
     void clearSources();
 
@@ -87,6 +104,16 @@ private:
     vc::LiveVoiceChain chain_;
     juce::AudioBuffer<float> scratch_; // wet render scratch, preallocated
 
+    // Backing-music ducking. Music is rendered into musicScratch_, ducked by the
+    // voice key, then summed into the output.
+    vc::Ducker ducker_;
+    juce::AudioBuffer<float> musicScratch_; // music render scratch, preallocated
+    std::vector<float> keyMono_;            // voice key (mono), preallocated
+    std::atomic<float> duckLookAheadMs_ { 5.0f };
+    std::atomic<float> duckMaxReductionDb_ { 9.0f };
+    std::atomic<float> duckBlend_ { 0.0f };
+    std::atomic<float> musicDuckReductionDb_ { 0.0f };
+
     std::atomic<bool> playing_ { false };
     std::atomic<bool> showAfter_ { false };
     std::atomic<int> mutedMusicClipIndex_ { -1 };
@@ -107,4 +134,8 @@ private:
     // Analysis ring for the live spectrum (single producer = audio thread).
     std::vector<float> analysisRing_ = std::vector<float>(kAnalysisSize, 0.0f);
     std::atomic<int> analysisWrite_ { 0 };
+
+    // Parallel ring for the post-duck backing-music output (DuckView waveform).
+    std::vector<float> musicAnalysisRing_ = std::vector<float>(kAnalysisSize, 0.0f);
+    std::atomic<int> musicAnalysisWrite_ { 0 };
 };

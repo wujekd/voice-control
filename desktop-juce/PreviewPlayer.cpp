@@ -64,6 +64,8 @@ void PreviewPlayer::clearSources() {
     mutedMusicClipIndex_.store(-1, std::memory_order_relaxed);
     musicMasterGainDb_.store(0.0f, std::memory_order_relaxed);
     musicSmoothedMasterGain_ = 1.0f;
+    ducker_.reset();
+    musicDuckReductionDb_.store(0.0f, std::memory_order_relaxed);
     readPos_ = 0.0;
     rmsLin_ = 0.0;
     peakLin_ = 0.0;
@@ -101,8 +103,11 @@ void PreviewPlayer::prepareToPlay(int samplesPerBlock, double deviceSampleRate) 
     deviceRate_ = deviceSampleRate > 0.0 ? deviceSampleRate : 48000.0;
     blockSize_ = juce::jmax(32, samplesPerBlock);
     scratch_.setSize(2, blockSize_, false, false, true);
+    musicScratch_.setSize(2, blockSize_, false, false, true);
+    keyMono_.assign(static_cast<std::size_t>(blockSize_), 0.0f);
     // The chain runs at the device rate (post-resample), 2 channels.
     chain_.prepare(static_cast<int>(deviceRate_), 2);
+    ducker_.prepare(deviceRate_, 2);
 }
 
 void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample, int numSamples,
@@ -263,19 +268,48 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
             info.buffer->copyFrom(ch, info.startSample, scratch_, ch, 0, produced);
     }
 
-    // 4. Capture the processed main file (voice only) for the live spectrum analyzer.
+    // 4. Capture the processed main file (voice only) for the live spectrum
+    //    analyzer, and reuse the same mono sum as the ducking sidechain key.
     int w = analysisWrite_.load(std::memory_order_relaxed);
     for (int i = 0; i < produced; ++i) {
         float mono = 0.0f;
         for (int ch = 0; ch < outChannels; ++ch)
             mono += info.buffer->getSample(ch, info.startSample + i);
         mono /= static_cast<float>(juce::jmax(1, outChannels));
+        keyMono_[static_cast<std::size_t>(i)] = mono;
         analysisRing_[static_cast<std::size_t>(w & (kAnalysisSize - 1))] = mono;
         ++w;
     }
     analysisWrite_.store(w, std::memory_order_release);
 
-    mixMusicInto(*info.buffer, info.startSample, produced, timelineStartSeconds);
+    // 4b. Render the backing music into its own scratch buffer, duck it against
+    //     the voice key, then sum it into the output.
+    const int mch = juce::jmin(outChannels, musicScratch_.getNumChannels());
+    musicScratch_.clear(0, produced);
+    mixMusicInto(musicScratch_, 0, produced, timelineStartSeconds);
+
+    ducker_.setLookAheadMs(duckLookAheadMs_.load(std::memory_order_relaxed));
+    ducker_.setMaxReductionDb(duckMaxReductionDb_.load(std::memory_order_relaxed));
+    ducker_.setBlend(duckBlend_.load(std::memory_order_relaxed));
+    ducker_.process(musicScratch_.getArrayOfWritePointers(), mch, produced, keyMono_.data());
+    musicDuckReductionDb_.store(ducker_.lastReductionDb(), std::memory_order_relaxed);
+
+    for (int ch = 0; ch < outChannels; ++ch) {
+        const int sc = juce::jmin(ch, mch - 1);
+        info.buffer->addFrom(ch, info.startSample, musicScratch_, sc, 0, produced);
+    }
+
+    // 4c. Capture the post-duck music (mono) for the DuckView waveform.
+    int mw = musicAnalysisWrite_.load(std::memory_order_relaxed);
+    for (int i = 0; i < produced; ++i) {
+        float mono = 0.0f;
+        for (int ch = 0; ch < mch; ++ch)
+            mono += musicScratch_.getSample(ch, i);
+        mono /= static_cast<float>(juce::jmax(1, mch));
+        musicAnalysisRing_[static_cast<std::size_t>(mw & (kAnalysisSize - 1))] = mono;
+        ++mw;
+    }
+    musicAnalysisWrite_.store(mw, std::memory_order_release);
 
     // 5. VU follows the full heard output, including backing music.
     double sumSquares = 0.0;
@@ -309,4 +343,11 @@ void PreviewPlayer::readAnalysisBlock(float* dest, int n) const {
     const int w = analysisWrite_.load(std::memory_order_acquire);
     for (int i = 0; i < n; ++i)
         dest[i] = analysisRing_[static_cast<std::size_t>((w - n + i) & (kAnalysisSize - 1))];
+}
+
+void PreviewPlayer::readMusicAnalysisBlock(float* dest, int n) const {
+    n = juce::jmin(n, kAnalysisSize);
+    const int w = musicAnalysisWrite_.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i)
+        dest[i] = musicAnalysisRing_[static_cast<std::size_t>((w - n + i) & (kAnalysisSize - 1))];
 }

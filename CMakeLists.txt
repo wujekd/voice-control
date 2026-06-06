@@ -10,6 +10,7 @@ add_library(vc_core STATIC
     core/Biquad.cpp
     core/Compressor.cpp
     core/DeEsser.cpp
+    core/Ducker.cpp
     core/Eq.cpp
     core/EqSection.cpp
     core/Limiter.cpp
@@ -91,6 +92,7 @@ if(VC_BUILD_APP)
     target_sources(voice-control-app PRIVATE
         desktop-juce/Main.cpp
         desktop-juce/MainComponent.cpp
+        desktop-juce/ExportComponent.cpp
         desktop-juce/FileDropComponent.cpp
         desktop-juce/MusicTimeline.cpp
         desktop-juce/PreviewPlayer.cpp
