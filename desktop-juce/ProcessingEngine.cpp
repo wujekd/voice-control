@@ -51,12 +51,14 @@ vc::AudioBuffer ProcessingEngine::blendNoiseReduction(const vc::AudioBuffer& ori
     return out;
 }
 
-void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips) {
+void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips,
+                                    double masterGainDb) {
     const int destChannels = dest.numChannels();
     const std::size_t destFrames = dest.numFrames();
     if (destChannels <= 0 || destFrames == 0)
         return;
 
+    const float masterGain = static_cast<float>(std::pow(10.0, std::clamp(masterGainDb, -60.0, 6.0) / 20.0));
     for (const auto& clip : clips) {
         if (clip.audio.getNumSamples() <= 1 || clip.sampleRate <= 0.0)
             continue;
@@ -65,7 +67,7 @@ void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<Mus
         if (startFrame >= static_cast<int>(destFrames))
             continue;
 
-        const float gain = static_cast<float>(std::pow(10.0, clip.gainDb / 20.0));
+        const float gain = masterGain * static_cast<float>(std::pow(10.0, clip.gainDb / 20.0));
         const double srcRatio = clip.sampleRate / static_cast<double>(dest.sampleRate);
         const int clipSamples = clip.audio.getNumSamples();
         const int maxFrames = static_cast<int>(std::min<std::size_t>(
@@ -185,7 +187,7 @@ void ProcessingEngine::setMusicClipParams(int index, double startSeconds, double
 }
 
 bool ProcessingEngine::processMusicWaveformChunks(int maxColumns) {
-    constexpr int kWaveformColumns = 320;
+    constexpr int kWaveformColumns = 4096;
     bool changed = false;
     int remaining = std::max(0, maxColumns);
 
@@ -194,7 +196,7 @@ bool ProcessingEngine::processMusicWaveformChunks(int maxColumns) {
             break;
         if (clip.audio.getNumSamples() <= 0 || clip.audio.getNumChannels() <= 0)
             continue;
-        if (clip.waveformPeaks.empty()) {
+        if (static_cast<int>(clip.waveformPeaks.size()) != kWaveformColumns) {
             clip.waveformPeaks.assign(kWaveformColumns, 0.0f);
             clip.waveformProcessedColumns = 0;
         }
@@ -230,6 +232,10 @@ void ProcessingEngine::removeMusicClip(int index) {
 
 void ProcessingEngine::setMusicClips(std::vector<MusicClip> clips) {
     musicClips_ = std::move(clips);
+}
+
+void ProcessingEngine::setMusicMasterGainDb(double gainDb) {
+    musicMasterGainDb_ = std::clamp(gainDb, -60.0, 6.0);
 }
 
 double ProcessingEngine::measureChainLoudness(const vc::ChainParams& params) const {
@@ -275,7 +281,7 @@ void ProcessingEngine::process(const vc::ChainParams& params) {
     vc::VoiceChain chain;
     chain.prepare(processed_.sampleRate, processed_.numChannels(), params);
     chain.process(processed_);
-    mixMusicInto(processed_, musicClips_);
+    mixMusicInto(processed_, musicClips_, musicMasterGainDb_);
 
     lastInputLufs_ = chain.measuredInputLufs();
     lastGainDb_ = chain.appliedLoudnessGainDb();

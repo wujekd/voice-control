@@ -40,6 +40,8 @@ public:
     void removeMusicClip(int index);
     void setMusicClips(std::vector<MusicClip> clips);
     const std::vector<MusicClip>& musicClips() const { return musicClips_; }
+    void setMusicMasterGainDb(double gainDb);
+    double musicMasterGainDb() const { return musicMasterGainDb_; }
 
     // Whole-file average spectrum and the auto-EQ curve derived from it,
     // computed once at load. Used by the chain and the GUI spectrum view.
@@ -87,7 +89,7 @@ private:
     static vc::AudioBuffer blendNoiseReduction(const vc::AudioBuffer& original,
                                                const vc::AudioBuffer& denoised,
                                                double amount);
-    static void mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips);
+    static void mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips, double masterGainDb);
 
     vc::AudioBuffer original_;
     vc::AudioBuffer processed_;
@@ -98,6 +100,7 @@ private:
     juce::File sourceFile_;
     bool sourceHasVideo_ = false;
     std::vector<MusicClip> musicClips_;
+    double musicMasterGainDb_ = 0.0;
     vc::SpectrumResult spectrum_;
     std::vector<vc::EqBand> autoEqBands_;
     double inputLufs_ = 0.0;
