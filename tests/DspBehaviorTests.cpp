@@ -1,6 +1,9 @@
 #include "AudioBuffer.h"
+#include "Ducker.h"
+#include "Eq.h"
 #include "LoudnessNormalizer.h"
 #include "Presets.h"
+#include "SpectrumAnalyzer.h"
 #include "VoiceChain.h"
 
 #include <algorithm>
@@ -59,10 +62,69 @@ double peakAbs(const vc::AudioBuffer& b) {
     return peak;
 }
 
+vc::SpectrumResult makeRelativeSpectrum(double lowRel, double mudRel, double presRel, double airRel) {
+    vc::SpectrumResult s;
+    s.sampleRate = 48000.0;
+    s.fftSize = 4096;
+    s.valid = true;
+    const int bins = s.fftSize / 2;
+    s.binPower.assign(static_cast<std::size_t>(bins), 1.0);
+    s.binDb.assign(static_cast<std::size_t>(bins), 0.0f);
+
+    auto setBand = [&](double f1, double f2, double relDb) {
+        const double binHz = s.sampleRate / s.fftSize;
+        const int lo = std::max(1, static_cast<int>(std::floor(f1 / binHz)));
+        const int hi = std::min(bins - 1, static_cast<int>(std::ceil(f2 / binHz)));
+        const double power = std::pow(10.0, relDb / 10.0);
+        for (int k = lo; k <= hi; ++k) {
+            s.binPower[static_cast<std::size_t>(k)] = power;
+            s.binDb[static_cast<std::size_t>(k)] = static_cast<float>(relDb);
+        }
+    };
+
+    setBand(60.0, 200.0, lowRel);
+    setBand(200.0, 450.0, mudRel);
+    setBand(3000.0, 6000.0, presRel);
+    setBand(8000.0, 14000.0, airRel);
+    return s;
+}
+
 bool expect(bool condition, const std::string& message) {
     if (!condition)
         std::cerr << "FAIL: " << message << "\n";
     return condition;
+}
+
+// Drives a single-channel Ducker with a steady tone (the "music") and a
+// constant-amplitude voice key, then returns the RMS of the second half of the
+// output (past the detector/filter settling transient).
+double duckedToneRms(double freqHz, double blend, double keyAmp, double maxReductionDb) {
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr int sr = 48000;
+    constexpr int N = sr; // 1 second
+    vc::Ducker d;
+    d.prepare(sr, 1);
+    d.setMaxReductionDb(maxReductionDb);
+    d.setLookAheadMs(0.0);
+    d.setBlend(blend);
+
+    std::vector<float> music(N), key(N);
+    for (int i = 0; i < N; ++i) {
+        music[static_cast<std::size_t>(i)] = static_cast<float>(std::sin(2.0 * kPi * freqHz * i / sr));
+        key[static_cast<std::size_t>(i)] = static_cast<float>(keyAmp);
+    }
+    for (int s = 0; s < N; s += 512) {
+        const int n = std::min(512, N - s);
+        float* ch[1] = { music.data() + s };
+        d.process(ch, 1, n, key.data() + s);
+    }
+    double sum = 0.0;
+    int count = 0;
+    for (int i = N / 2; i < N; ++i) {
+        sum += static_cast<double>(music[static_cast<std::size_t>(i)]) * music[static_cast<std::size_t>(i)];
+        ++count;
+    }
+    return std::sqrt(sum / std::max(1, count));
 }
 
 } // namespace
@@ -132,6 +194,46 @@ int main() {
 
     ok &= expect(deEssChain.deEssReductionDb() > 2.0f,
                  "sibilant source should visibly trigger the de-esser");
+
+    const auto dullVoice = makeRelativeSpectrum(-2.0, -1.0, -10.0, -10.0);
+    const auto cleanDry = makeRelativeSpectrum(-2.0, -1.0, -10.0, -10.0);
+    const auto harshDry = makeRelativeSpectrum(-2.0, -1.0, 0.0, -10.0);
+    const auto cleanEq = vc::computeNoiseAwareAutoEqBands(dullVoice, cleanDry, 1.0);
+    const auto harshEq = vc::computeNoiseAwareAutoEqBands(dullVoice, harshDry, 1.0);
+
+    auto presenceBoost = [](const std::vector<vc::EqBand>& bands) {
+        double boost = 0.0;
+        for (const auto& band : bands)
+            if (band.type == vc::EqBand::Type::Peak && std::fabs(band.freq - 4000.0) < 1.0)
+                boost = std::max(boost, band.gainDb);
+        return boost;
+    };
+
+    ok &= expect(presenceBoost(cleanEq) > 1.0,
+                 "clean dull vocal may receive a presence boost");
+    ok &= expect(presenceBoost(harshEq) < 1.0,
+                 "presence boost should be suppressed when dry signal already has harsh upper-mid energy");
+
+    // ---- Background music ducking ----
+    const double unityRms = 1.0 / std::sqrt(2.0); // RMS of a unit-amplitude sine
+
+    // Silent voice key leaves the music essentially untouched.
+    const double quietMusic = duckedToneRms(1000.0, 0.0, 0.0, 12.0);
+    ok &= expect(quietMusic > unityRms * 0.9,
+                 "a silent voice key leaves the backing music near unity");
+
+    // A loud voice key ducks full-band music well below unity.
+    const double duckedMusic = duckedToneRms(1000.0, 0.0, 0.5, 12.0);
+    ok &= expect(duckedMusic < unityRms * 0.6,
+                 "a loud voice key ducks full-band music");
+
+    // Mid-only blend (100%) protects the low end while still ducking the mids.
+    const double midOnlyLow = duckedToneRms(80.0, 1.0, 0.5, 12.0);
+    const double midOnlyMid = duckedToneRms(1000.0, 1.0, 0.5, 12.0);
+    ok &= expect(midOnlyLow > midOnlyMid + 0.1,
+                 "mid-only ducking protects the low end more than the mid band");
+    ok &= expect(midOnlyLow > unityRms * 0.75,
+                 "mid-only ducking leaves a low-frequency bassline mostly intact");
 
     if (!ok)
         return 1;

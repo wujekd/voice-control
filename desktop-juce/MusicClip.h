@@ -6,6 +6,7 @@
 
 struct MusicClip {
     juce::String name;
+    juce::String sourcePath;
     juce::AudioBuffer<float> audio;
     double sampleRate = 48000.0;
     double startSeconds = 0.0;

@@ -23,6 +23,20 @@ public:
         repaint();
     }
 
+    void invalidateProcessedSpectrumPreview() {
+        processedSpectrum_ = {};
+        repaint();
+    }
+
+    void setProcessedSpectrumBusy(bool busy) {
+        processedSpectrumBusy_ = busy;
+        repaint();
+    }
+
+    bool tickAnimation() {
+        return false;
+    }
+
     void setEq(std::vector<vc::EqBand> bands, double highpassHz, double sampleRate) {
         bands_ = std::move(bands);
         highpassHz_ = highpassHz;
@@ -46,7 +60,7 @@ public:
 private:
     static constexpr float kFMin = 20.0f;
     static constexpr float kFMax = 20000.0f;
-    static constexpr float kEqRangeDb = 15.0f; // EQ curve full-scale
+    static constexpr float kEqRangeDb = 12.0f; // EQ curve full-scale
 
     float freqToX(float f, float w) const {
         const float t = std::log(f / kFMin) / std::log(kFMax / kFMin);
@@ -61,6 +75,7 @@ private:
     vc::SpectrumResult processedSpectrum_; // static whole-file processed voice
     vc::SpectrumResult liveSpectrum_; // animated, while playing
     bool showLive_ = false;
+    bool processedSpectrumBusy_ = false;
     std::vector<vc::EqBand> bands_;
     double highpassHz_ = 0.0;
     double sampleRate_ = 48000.0;

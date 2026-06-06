@@ -11,11 +11,83 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <memory>
 
 namespace {
+constexpr int kAnalysisCacheVersion = 2;
+
 bool extensionIsVideo(const juce::File& f) {
     static const juce::StringArray video { "mp4", "mov", "m4v", "mkv", "avi", "webm" };
     return video.contains(f.getFileExtension().removeCharacters(".").toLowerCase());
+}
+
+juce::File cacheFileFor(const juce::File& source) {
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Voice Control")
+        .getChildFile("AnalysisCache");
+    dir.createDirectory();
+    return dir.getChildFile(juce::String::toHexString(source.getFullPathName().hashCode64()) + ".json");
+}
+
+juce::var floatVectorToVar(const std::vector<float>& values) {
+    juce::Array<juce::var> arr;
+    arr.ensureStorageAllocated(static_cast<int>(values.size()));
+    for (float v : values)
+        arr.add(static_cast<double>(v));
+    return arr;
+}
+
+juce::var doubleVectorToVar(const std::vector<double>& values) {
+    juce::Array<juce::var> arr;
+    arr.ensureStorageAllocated(static_cast<int>(values.size()));
+    for (double v : values)
+        arr.add(v);
+    return arr;
+}
+
+std::vector<float> varToFloatVector(const juce::var& value) {
+    std::vector<float> out;
+    if (!value.isArray())
+        return out;
+    const auto* arr = value.getArray();
+    out.reserve(static_cast<std::size_t>(arr->size()));
+    for (const auto& v : *arr)
+        out.push_back(static_cast<float>(static_cast<double>(v)));
+    return out;
+}
+
+std::vector<double> varToDoubleVector(const juce::var& value) {
+    std::vector<double> out;
+    if (!value.isArray())
+        return out;
+    const auto* arr = value.getArray();
+    out.reserve(static_cast<std::size_t>(arr->size()));
+    for (const auto& v : *arr)
+        out.push_back(static_cast<double>(v));
+    return out;
+}
+
+juce::var spectrumToVar(const vc::SpectrumResult& spectrum) {
+    auto obj = std::make_unique<juce::DynamicObject>();
+    obj->setProperty("valid", spectrum.valid);
+    obj->setProperty("sampleRate", spectrum.sampleRate);
+    obj->setProperty("fftSize", spectrum.fftSize);
+    obj->setProperty("binPower", doubleVectorToVar(spectrum.binPower));
+    obj->setProperty("binDb", floatVectorToVar(spectrum.binDb));
+    return juce::var(obj.release());
+}
+
+vc::SpectrumResult varToSpectrum(const juce::var& value) {
+    vc::SpectrumResult out;
+    if (auto* obj = value.getDynamicObject()) {
+        out.valid = static_cast<bool>(obj->getProperty("valid"));
+        out.sampleRate = static_cast<double>(obj->getProperty("sampleRate"));
+        out.fftSize = static_cast<int>(obj->getProperty("fftSize"));
+        out.binPower = varToDoubleVector(obj->getProperty("binPower"));
+        out.binDb = varToFloatVector(obj->getProperty("binDb"));
+        out.valid = out.valid && !out.binPower.empty() && !out.binDb.empty();
+    }
+    return out;
 }
 
 }
@@ -28,6 +100,34 @@ juce::AudioBuffer<float> ProcessingEngine::toJuce(const vc::AudioBuffer& src) {
     for (int ch = 0; ch < channels; ++ch)
         out.copyFrom(ch, 0, src.channels[static_cast<std::size_t>(ch)].data(), frames);
     return out;
+}
+
+std::vector<float> ProcessingEngine::computeWaveformPeaks(const vc::AudioBuffer& src, int columns) {
+    const int n = std::max(1, columns);
+    std::vector<float> peaks(static_cast<std::size_t>(n), 0.0f);
+    const std::size_t frames = src.numFrames();
+    const int channels = src.numChannels();
+    if (frames == 0 || channels <= 0)
+        return peaks;
+
+    for (int x = 0; x < n; ++x) {
+        const std::size_t s0 = static_cast<std::size_t>(
+            static_cast<unsigned long long>(x) * frames / static_cast<unsigned long long>(n));
+        const std::size_t s1 = std::max<std::size_t>(s0 + 1,
+            static_cast<std::size_t>(
+                static_cast<unsigned long long>(x + 1) * frames / static_cast<unsigned long long>(n)));
+
+        float peak = 0.0f;
+        for (std::size_t i = s0; i < std::min(frames, s1); ++i) {
+            float mono = 0.0f;
+            for (int ch = 0; ch < channels; ++ch)
+                mono += src.channels[static_cast<std::size_t>(ch)][i];
+            mono /= static_cast<float>(channels);
+            peak = std::max(peak, std::abs(mono));
+        }
+        peaks[static_cast<std::size_t>(x)] = peak;
+    }
+    return peaks;
 }
 
 vc::AudioBuffer ProcessingEngine::blendNoiseReduction(const vc::AudioBuffer& original,
@@ -49,6 +149,65 @@ vc::AudioBuffer ProcessingEngine::blendNoiseReduction(const vc::AudioBuffer& ori
             dst[i] = dry * src[i] + wet * den[i];
     }
     return out;
+}
+
+bool ProcessingEngine::loadAnalysisCache(const juce::File& media) {
+    const auto cache = cacheFileFor(media);
+    if (!cache.existsAsFile())
+        return false;
+
+    juce::var parsed;
+    juce::JSON::parse(cache.loadFileAsString(), parsed);
+    auto* root = parsed.getDynamicObject();
+    if (root == nullptr)
+        return false;
+
+    if (static_cast<int>(root->getProperty("schemaVersion")) != kAnalysisCacheVersion)
+        return false;
+    if (root->getProperty("path").toString() != media.getFullPathName())
+        return false;
+    if (static_cast<juce::int64>(root->getProperty("sizeBytes")) != media.getSize())
+        return false;
+    if (static_cast<juce::int64>(root->getProperty("modifiedMs"))
+        != media.getLastModificationTime().toMilliseconds())
+        return false;
+
+    inputLufs_ = static_cast<double>(root->getProperty("inputLufs"));
+    inputPeakDb_ = static_cast<double>(root->getProperty("inputPeakDb"));
+    drySpectrum_ = varToSpectrum(root->getProperty("drySpectrum"));
+    spectrum_ = varToSpectrum(root->getProperty("activeSpectrum"));
+    voiceProfileUsesDenoised_ = static_cast<bool>(root->getProperty("voiceProfileUsesDenoised"));
+    voiceWaveformPeaks_ = varToFloatVector(root->getProperty("voiceWaveformPeaks"));
+    processedVoiceWaveformPeaks_ = varToFloatVector(root->getProperty("processedVoiceWaveformPeaks"));
+
+    if (!drySpectrum_.valid || !spectrum_.valid || voiceWaveformPeaks_.empty()) {
+        voiceProfileUsesDenoised_ = false;
+        processedVoiceWaveformPeaks_.clear();
+        return false;
+    }
+
+    autoEqBands_ = autoEqBands(0.6);
+    return true;
+}
+
+void ProcessingEngine::saveAnalysisCache() const {
+    if (sourceFile_ == juce::File() || !drySpectrum_.valid || !spectrum_.valid || voiceWaveformPeaks_.empty())
+        return;
+
+    auto root = std::make_unique<juce::DynamicObject>();
+    root->setProperty("schemaVersion", kAnalysisCacheVersion);
+    root->setProperty("path", sourceFile_.getFullPathName());
+    root->setProperty("sizeBytes", static_cast<double>(sourceFile_.getSize()));
+    root->setProperty("modifiedMs", static_cast<double>(sourceFile_.getLastModificationTime().toMilliseconds()));
+    root->setProperty("inputLufs", inputLufs_);
+    root->setProperty("inputPeakDb", inputPeakDb_);
+    root->setProperty("drySpectrum", spectrumToVar(drySpectrum_));
+    root->setProperty("activeSpectrum", spectrumToVar(spectrum_));
+    root->setProperty("voiceProfileUsesDenoised", voiceProfileUsesDenoised_);
+    root->setProperty("voiceWaveformPeaks", floatVectorToVar(voiceWaveformPeaks_));
+    root->setProperty("processedVoiceWaveformPeaks", floatVectorToVar(processedVoiceWaveformPeaks_));
+
+    cacheFileFor(sourceFile_).replaceWithText(juce::JSON::toString(juce::var(root.release())));
 }
 
 void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips,
@@ -121,20 +280,31 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
     beforeJuce_ = toJuce(original_);
     afterJuce_ = beforeJuce_; // until processed
 
-    // Measure input loudness once; the live chain uses it for its cached gain.
-    vc::LoudnessNormalizer meter;
-    meter.prepare(original_.sampleRate, 0.0);
-    inputLufs_ = meter.measureIntegratedLufs(original_);
+    const bool cacheLoaded = loadAnalysisCache(media);
+    if (!cacheLoaded) {
+        voiceWaveformPeaks_ = computeWaveformPeaks(original_, 2048);
+        processedVoiceWaveformPeaks_.clear();
 
-    double peak = 0.0;
-    for (const auto& ch : original_.channels)
-        for (float s : ch)
-            peak = std::max(peak, static_cast<double>(std::fabs(s)));
-    inputPeakDb_ = 20.0 * std::log10(peak + 1e-12);
+        // Measure input loudness once; the live chain uses it for its cached gain.
+        vc::LoudnessNormalizer meter;
+        meter.prepare(original_.sampleRate, 0.0);
+        inputLufs_ = meter.measureIntegratedLufs(original_);
 
-    // Analyse the whole-file spectrum and derive the wide auto-EQ curve.
-    spectrum_ = vc::SpectrumAnalyzer::analyze(original_, 12);
-    autoEqBands_ = vc::computeAutoEqBands(spectrum_, 0.6);
+        double peak = 0.0;
+        for (const auto& ch : original_.channels)
+            for (float s : ch)
+                peak = std::max(peak, static_cast<double>(std::fabs(s)));
+        inputPeakDb_ = 20.0 * std::log10(peak + 1e-12);
+
+        // Analyse the dry whole-file spectrum immediately so the UI can show a
+        // profile before denoise finishes. It is replaced with a denoised profile
+        // by refreshVoiceProfileFromDenoised() once the background pass completes.
+        drySpectrum_ = vc::SpectrumAnalyzer::analyze(original_, 12);
+        spectrum_ = drySpectrum_;
+        voiceProfileUsesDenoised_ = false;
+        autoEqBands_ = autoEqBands(0.6);
+        saveAnalysisCache();
+    }
 
     // Kick off the in-process neural denoise in the background. Playback can
     // start immediately on the dry signal; the denoised version fills in (faster
@@ -143,6 +313,74 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
 
     processedReady_ = false;
     return true;
+}
+
+void ProcessingEngine::clear() {
+    streamer_.stop();
+    original_ = {};
+    processed_ = {};
+    beforeJuce_.setSize(1, 1);
+    beforeJuce_.clear();
+    afterJuce_.setSize(1, 1);
+    afterJuce_.clear();
+    voiceWaveformPeaks_.clear();
+    processedVoiceWaveformPeaks_.clear();
+    processedReady_ = false;
+    sourceFile_ = juce::File();
+    sourceHasVideo_ = false;
+    musicClips_.clear();
+    musicMasterGainDb_ = 0.0;
+    spectrum_ = {};
+    drySpectrum_ = {};
+    autoEqBands_.clear();
+    voiceProfileUsesDenoised_ = false;
+    inputLufs_ = 0.0;
+    inputPeakDb_ = -120.0;
+    lastInputLufs_ = 0.0;
+    lastGainDb_ = 0.0;
+}
+
+std::vector<vc::EqBand> ProcessingEngine::autoEqBands(double strength) const {
+    if (voiceProfileUsesDenoised_)
+        return vc::computeNoiseAwareAutoEqBands(spectrum_, drySpectrum_, strength);
+    return vc::computeAutoEqBands(spectrum_, strength);
+}
+
+vc::SpectrumResult ProcessingEngine::previewSpectrum(double noiseReductionAmount) const {
+    if (!drySpectrum_.valid)
+        return spectrum_;
+    if (!voiceProfileUsesDenoised_ || !spectrum_.valid)
+        return drySpectrum_;
+
+    vc::SpectrumResult out = drySpectrum_;
+    const float wet = static_cast<float>(std::clamp(noiseReductionAmount, 0.0, 1.0));
+    const float dry = 1.0f - wet;
+    const std::size_t bins = std::min(drySpectrum_.binPower.size(), spectrum_.binPower.size());
+    out.binPower.assign(bins, 0.0);
+    out.binDb.assign(bins, -120.0f);
+    for (std::size_t i = 0; i < bins; ++i) {
+        const double p = dry * dry * drySpectrum_.binPower[i] + wet * wet * spectrum_.binPower[i];
+        out.binPower[i] = p;
+        out.binDb[i] = static_cast<float>(10.0 * std::log10(p + 1e-12));
+    }
+    out.valid = bins > 0;
+    return out;
+}
+
+bool ProcessingEngine::refreshVoiceProfileFromDenoised() {
+    if (voiceProfileUsesDenoised_ || original_.numFrames() == 0 || !streamer_.isComplete())
+        return false;
+
+    const auto& denoised = streamer_.denoised();
+    if (denoised.numFrames() == 0)
+        return false;
+
+    spectrum_ = vc::SpectrumAnalyzer::analyze(denoised, 12);
+    voiceProfileUsesDenoised_ = spectrum_.valid;
+    processedVoiceWaveformPeaks_ = computeWaveformPeaks(denoised, 2048);
+    autoEqBands_ = autoEqBands(0.6);
+    saveAnalysisCache();
+    return voiceProfileUsesDenoised_;
 }
 
 bool ProcessingEngine::addMusicClip(const juce::File& audioFile, juce::String& error) {
@@ -162,6 +400,7 @@ bool ProcessingEngine::addMusicClip(const juce::File& audioFile, juce::String& e
 
     MusicClip clip;
     clip.name = audioFile.getFileName();
+    clip.sourcePath = audioFile.getFullPathName();
     clip.sampleRate = decoded.sampleRate;
     clip.audio = toJuce(decoded);
     musicClips_.push_back(std::move(clip));
@@ -291,7 +530,7 @@ void ProcessingEngine::process(const vc::ChainParams& params) {
 }
 
 bool ProcessingEngine::exportTo(const juce::File& output, const vc::ChainParams& params,
-                                juce::String& error) {
+                                bool muxVideo, juce::String& error) {
     if (!hasAudio()) {
         error = "No audio loaded.";
         return false;
@@ -309,7 +548,7 @@ bool ProcessingEngine::exportTo(const juce::File& output, const vc::ChainParams&
         vc::writeWavFloat32(temp.getFullPathName().toStdString(), processed_);
 
         vc::FFmpeg ffmpeg;
-        if (sourceHasVideo_) {
+        if (muxVideo) {
             ffmpeg.remux(sourceFile_.getFullPathName().toStdString(),
                          temp.getFullPathName().toStdString(),
                          output.getFullPathName().toStdString());

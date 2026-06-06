@@ -18,8 +18,11 @@ public:
     std::function<void(double)> onSeek;
 
     void setVoice(const juce::AudioBuffer<float>* voice, double sampleRate);
+    void setVoiceWaveformPeaks(const std::vector<float>* dryPeaks,
+                               const std::vector<float>* processedPeaks);
     void setClips(const std::vector<MusicClip>* clips, int selectedIndex);
     void setPlayheadSeconds(double seconds);
+    bool tickAnimation();
 
     void paint(juce::Graphics& g) override;
     void mouseDown(const juce::MouseEvent& e) override;
@@ -44,6 +47,8 @@ private:
     bool fadeHandleAt(juce::Point<float> p, int& index, DragMode& mode) const;
     bool plusAt(juce::Point<float> p, double& seconds) const;
     void drawWaveform(juce::Graphics& g, juce::Rectangle<float> area);
+    void drawWaveformPeaks(juce::Graphics& g, juce::Rectangle<float> area,
+                           const std::vector<float>& peaks, float alpha);
     void drawClipWaveform(juce::Graphics& g, const MusicClip& clip, juce::Rectangle<float> area);
     void drawClipFadeOverlay(juce::Graphics& g, const MusicClip& clip, juce::Rectangle<float> area, bool selected);
     void drawClipRemoveButton(juce::Graphics& g, juce::Rectangle<float> bounds);
@@ -51,6 +56,8 @@ private:
     void drawGapPluses(juce::Graphics& g);
 
     const juce::AudioBuffer<float>* voice_ = nullptr;
+    const std::vector<float>* dryVoicePeaks_ = nullptr;
+    const std::vector<float>* processedVoicePeaks_ = nullptr;
     const std::vector<MusicClip>* clips_ = nullptr;
     double sampleRate_ = 48000.0;
     double playheadSeconds_ = 0.0;
@@ -64,4 +71,6 @@ private:
     double dragFadeOutSeconds_ = 0.0;
     double dragMouseSeconds_ = 0.0;
     bool scrubbing_ = false;
+    bool hadProcessedVoicePeaks_ = false;
+    float voiceWaveformTransition_ = 1.0f;
 };

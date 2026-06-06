@@ -16,6 +16,7 @@ void SpectrumView::paint(juce::Graphics& g) {
     auto bounds = getLocalBounds().toFloat();
     const float w = bounds.getWidth();
     const float h = bounds.getHeight();
+    const auto plot = bounds.reduced(0.0f, 8.0f).withTrimmedBottom(10.0f);
 
     g.setColour(juce::Colour(0xff14161b));
     g.fillRoundedRectangle(bounds, 6.0f);
@@ -39,34 +40,31 @@ void SpectrumView::paint(juce::Graphics& g) {
         float maxDb = -120.0f;
         for (int px = 0; px <= (int) w; px += 2)
             maxDb = juce::jmax(maxDb, spec.dbAt(xToFreq((float) px, w)));
-        const float top = maxDb + 3.0f, bot = maxDb - 67.0f;
-        auto mapDb = [&](float db) { return juce::jmap(db, bot, top, h, 0.0f); };
+        const float top = maxDb + 10.0f, bot = maxDb - 70.0f;
+        auto mapDb = [&](float db) { return juce::jmap(db, bot, top, plot.getBottom(), plot.getY()); };
 
         juce::Path path;
-        path.startNewSubPath(0.0f, h);
+        path.startNewSubPath(0.0f, plot.getBottom());
         for (int px = 0; px <= (int) w; px += 2) {
             const float f = xToFreq((float) px, w);
-            path.lineTo((float) px, juce::jlimit(0.0f, h, mapDb(spec.dbAt(f))));
+            path.lineTo((float) px, juce::jlimit(plot.getY(), plot.getBottom(), mapDb(spec.dbAt(f))));
         }
-        path.lineTo(w, h);
+        path.lineTo(w, plot.getBottom());
         path.closeSubPath();
         g.setColour(live ? juce::Colour(0xff4da6ff).withAlpha(0.22f)
                          : juce::Colours::white.withAlpha(0.10f));
         g.fillPath(path);
 
-        // For the static view, show the whole-file processed voice spectrum.
-        // Fall back to input + EQ while the processed preview is still rendering.
+        // Static preview: one immediate model only. The base spectrum already
+        // reflects the current noise-reduction blend; the EQ response is added
+        // directly so control changes do not switch between delayed states.
         if (!live) {
-            const bool hasProcessed = processedSpectrum_.valid;
-            const auto& resultSpec = hasProcessed ? processedSpectrum_ : spec;
             juce::Path after;
             bool started = false;
             for (int px = 0; px <= (int) w; px += 2) {
                 const float f = xToFreq((float) px, w);
-                const float db = hasProcessed
-                    ? resultSpec.dbAt(f)
-                    : spec.dbAt(f) + static_cast<float>(eqResponseAt(f));
-                const float y = juce::jlimit(0.0f, h, mapDb(db));
+                const float db = spec.dbAt(f) + static_cast<float>(eqResponseAt(f));
+                const float y = juce::jlimit(plot.getY(), plot.getBottom(), mapDb(db));
                 if (!started) { after.startNewSubPath((float) px, y); started = true; }
                 else after.lineTo((float) px, y);
             }
@@ -75,8 +73,8 @@ void SpectrumView::paint(juce::Graphics& g) {
         }
     }
 
-    // EQ curve on a +/-15 dB scale (0 dB at vertical centre).
-    const float midY = h * 0.5f;
+    // EQ curve on a fixed dB scale (0 dB at vertical centre).
+    const float midY = plot.getCentreY();
     g.setColour(juce::Colours::white.withAlpha(0.12f));
     g.drawHorizontalLine(static_cast<int>(midY), 0.0f, w);
 
@@ -85,9 +83,10 @@ void SpectrumView::paint(juce::Graphics& g) {
     for (int px = 0; px <= (int) w; px += 2) {
         const float f = xToFreq((float) px, w);
         const float db = (float) eqResponseAt(f);
-        const float y = midY - (db / kEqRangeDb) * (h * 0.5f);
+        const float y = juce::jlimit(plot.getY(), plot.getBottom(),
+                                     midY - (db / kEqRangeDb) * (plot.getHeight() * 0.5f));
         if (!started) { eq.startNewSubPath((float) px, y); started = true; }
-        else eq.lineTo((float) px, juce::jlimit(0.0f, h, y));
+        else eq.lineTo((float) px, y);
     }
     g.setColour(juce::Colour(0xff6ee07a));
     g.strokePath(eq, juce::PathStrokeType(2.0f));
@@ -96,4 +95,6 @@ void SpectrumView::paint(juce::Graphics& g) {
     g.setFont(juce::Font(juce::FontOptions(10.0f)));
     g.drawText("EQ curve  (+/-" + juce::String((int) kEqRangeDb) + " dB)",
                getLocalBounds().reduced(4), juce::Justification::topRight);
+
+    (void) processedSpectrumBusy_;
 }

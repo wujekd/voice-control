@@ -22,6 +22,7 @@ public:
     // Decodes a video OR audio file's audio to the "before" buffer (via a temp
     // WAV). Returns false and fills `error` on failure. Slow (calls ffmpeg).
     bool loadMedia(const juce::File& media, juce::String& error);
+    void clear();
 
     // Runs the chain for the given params, producing the "after" buffer.
     void process(const vc::ChainParams& params);
@@ -30,7 +31,7 @@ public:
     // audio back into the video; for an audio source it writes an audio file
     // (format inferred from the output extension). Slow (calls ffmpeg).
     bool exportTo(const juce::File& output, const vc::ChainParams& params,
-                  juce::String& error);
+                  bool muxVideo, juce::String& error);
 
     bool addMusicClip(const juce::File& audioFile, juce::String& error);
     void setMusicClipParams(int index, double startSeconds, double sourceOffsetSeconds, double gainDb,
@@ -46,13 +47,19 @@ public:
     // Whole-file average spectrum and the auto-EQ curve derived from it,
     // computed once at load. Used by the chain and the GUI spectrum view.
     const vc::SpectrumResult& spectrum() const { return spectrum_; }
+    const vc::SpectrumResult& drySpectrum() const { return drySpectrum_; }
     const std::vector<vc::EqBand>& autoEqBands() const { return autoEqBands_; }
+    std::vector<vc::EqBand> autoEqBands(double strength) const;
+    vc::SpectrumResult previewSpectrum(double noiseReductionAmount) const;
 
     bool hasAudio() const { return original_.numFrames() > 0; }
     bool hasDenoised() const { return streamer_.modelReady(); }
+    bool voiceProfileUsesDenoised() const { return voiceProfileUsesDenoised_; }
     bool hasProcessed() const { return processedReady_; }
     const juce::AudioBuffer<float>& beforeBuffer() const { return beforeJuce_; }
     const juce::AudioBuffer<float>& afterBuffer() const { return afterJuce_; }
+    const std::vector<float>& voiceWaveformPeaks() const { return voiceWaveformPeaks_; }
+    const std::vector<float>& processedVoiceWaveformPeaks() const { return processedVoiceWaveformPeaks_; }
     double sampleRate() const { return static_cast<double>(original_.sampleRate); }
 
     // Progressive denoise output for the live preview blend. The planar buffer
@@ -65,6 +72,11 @@ public:
 
     // Steer the background denoiser toward the currently-playing source frame.
     void setPlayheadFrame(std::int64_t frame) { streamer_.setPlayheadFrame(frame); }
+
+    // Once the full-file denoise pass has completed, remeasure the balance
+    // profile from the 100% denoised voice so auto-EQ ignores room noise/rumble.
+    // Returns true only when it swaps in a newly-denoised profile.
+    bool refreshVoiceProfileFromDenoised();
 
     // Integrated loudness of the (unprocessed) input, measured once at load.
     // May be -inf for silence.
@@ -86,23 +98,30 @@ public:
 
 private:
     static juce::AudioBuffer<float> toJuce(const vc::AudioBuffer& src);
+    static std::vector<float> computeWaveformPeaks(const vc::AudioBuffer& src, int columns);
     static vc::AudioBuffer blendNoiseReduction(const vc::AudioBuffer& original,
                                                const vc::AudioBuffer& denoised,
                                                double amount);
     static void mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips, double masterGainDb);
+    bool loadAnalysisCache(const juce::File& media);
+    void saveAnalysisCache() const;
 
     vc::AudioBuffer original_;
     vc::AudioBuffer processed_;
     vc::DenoiseStreamer streamer_;
     juce::AudioBuffer<float> beforeJuce_;
     juce::AudioBuffer<float> afterJuce_;
+    std::vector<float> voiceWaveformPeaks_;
+    std::vector<float> processedVoiceWaveformPeaks_;
     bool processedReady_ = false;
     juce::File sourceFile_;
     bool sourceHasVideo_ = false;
     std::vector<MusicClip> musicClips_;
     double musicMasterGainDb_ = 0.0;
     vc::SpectrumResult spectrum_;
+    vc::SpectrumResult drySpectrum_;
     std::vector<vc::EqBand> autoEqBands_;
+    bool voiceProfileUsesDenoised_ = false;
     double inputLufs_ = 0.0;
     double inputPeakDb_ = -120.0;
     double lastInputLufs_ = 0.0;

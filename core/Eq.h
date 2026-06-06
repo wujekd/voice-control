@@ -28,6 +28,14 @@ std::vector<EqBand> toneAmountBands(double amount);
 // correction is applied. Returns only bands that move meaningfully.
 std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength = 0.7);
 
+// Noise-aware variant for when both the original and denoised voice profiles
+// are available. The denoised profile drives vocal correction intent, while
+// the dry profile constrains boosts that could amplify background material when
+// the user lowers the noise-reduction blend.
+std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpectrum,
+                                                 const SpectrumResult& drySpectrum,
+                                                 double strength = 0.7);
+
 // Configure a biquad from a band.
 void configureBiquad(Biquad& bq, const EqBand& band, double sampleRate);
 

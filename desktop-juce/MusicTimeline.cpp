@@ -8,8 +8,8 @@ constexpr float kClipEdgeGripTopInset = 16.0f;
 constexpr float kClipEdgeGripWidth = 7.0f;
 constexpr float kClipEdgeHitTopInset = 10.0f;
 constexpr float kClipEdgeHitWidth = 16.0f;
-constexpr float kVoiceLaneHeight = 88.0f;
-constexpr int kMusicLaneHeight = 84;
+constexpr float kVoiceLaneHeight = 96.0f;
+constexpr int kMusicLaneHeight = 88;
 
 void drawLaneLabel(juce::Graphics& g, juce::Rectangle<float> lane, const juce::String& text) {
     auto label = juce::Rectangle<float>(lane.getX() + 8.0f, lane.getBottom() - 26.0f,
@@ -25,6 +25,23 @@ void MusicTimeline::setVoice(const juce::AudioBuffer<float>* voice, double sampl
     repaint();
 }
 
+void MusicTimeline::setVoiceWaveformPeaks(const std::vector<float>* dryPeaks,
+                                          const std::vector<float>* processedPeaks) {
+    const bool hasProcessed = processedPeaks != nullptr && !processedPeaks->empty();
+    if (hasProcessed && !hadProcessedVoicePeaks_)
+        voiceWaveformTransition_ = 0.0f;
+    if (!hasProcessed) {
+        hadProcessedVoicePeaks_ = false;
+        voiceWaveformTransition_ = 1.0f;
+    }
+
+    dryVoicePeaks_ = dryPeaks;
+    processedVoicePeaks_ = processedPeaks;
+    if (hasProcessed)
+        hadProcessedVoicePeaks_ = true;
+    repaint();
+}
+
 void MusicTimeline::setClips(const std::vector<MusicClip>* clips, int selectedIndex) {
     clips_ = clips;
     selectedIndex_ = selectedIndex;
@@ -34,6 +51,14 @@ void MusicTimeline::setClips(const std::vector<MusicClip>* clips, int selectedIn
 void MusicTimeline::setPlayheadSeconds(double seconds) {
     playheadSeconds_ = juce::jlimit(0.0, timelineDurationSeconds(), seconds);
     repaint();
+}
+
+bool MusicTimeline::tickAnimation() {
+    if (voiceWaveformTransition_ >= 1.0f)
+        return false;
+    voiceWaveformTransition_ = juce::jmin(1.0f, voiceWaveformTransition_ + 0.08f);
+    repaint();
+    return voiceWaveformTransition_ < 1.0f;
 }
 
 double MusicTimeline::timelineDurationSeconds() const {
@@ -187,9 +212,43 @@ bool MusicTimeline::plusAt(juce::Point<float> p, double& seconds) const {
     return duration - cursor > 0.25;
 }
 
+void MusicTimeline::drawWaveformPeaks(juce::Graphics& g, juce::Rectangle<float> area,
+                                      const std::vector<float>& peaks, float alpha) {
+    if (peaks.empty() || alpha <= 0.01f)
+        return;
+
+    g.setColour(juce::Colour(0xff6bd0ff).withAlpha(alpha));
+    const float midY = area.getCentreY();
+    const float halfH = area.getHeight() * 0.38f;
+    const int width = std::max(1, static_cast<int>(area.getWidth()));
+    float maxPeak = 0.001f;
+    for (float p : peaks)
+        maxPeak = std::max(maxPeak, p);
+
+    for (int x = 0; x < width; ++x) {
+        const int index = static_cast<int>(
+            static_cast<int64_t>(x) * static_cast<int64_t>(peaks.size()) / width);
+        const float peak = juce::jlimit(0.0f, 1.0f,
+            peaks[static_cast<std::size_t>(std::min(index, static_cast<int>(peaks.size()) - 1))] / maxPeak);
+        const float px = area.getX() + static_cast<float>(x);
+        g.drawVerticalLine(static_cast<int>(px), midY - peak * halfH, midY + peak * halfH);
+    }
+}
+
 void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area) {
     g.setColour(juce::Colour(0xff303640));
     g.fillRoundedRectangle(area, 4.0f);
+
+    const bool hasDryPeaks = dryVoicePeaks_ != nullptr && !dryVoicePeaks_->empty();
+    const bool hasProcessedPeaks = processedVoicePeaks_ != nullptr && !processedVoicePeaks_->empty();
+    if (hasDryPeaks) {
+        const float transition = juce::jlimit(0.0f, 1.0f, voiceWaveformTransition_);
+        drawWaveformPeaks(g, area, *dryVoicePeaks_, hasProcessedPeaks ? 1.0f - transition : 1.0f);
+        if (hasProcessedPeaks)
+            drawWaveformPeaks(g, area, *processedVoicePeaks_, transition);
+        return;
+    }
+
     g.setColour(juce::Colour(0xff6bd0ff));
 
     if (voice_ == nullptr || voice_->getNumSamples() == 0)
@@ -218,7 +277,7 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
     }
 
     const float midY = area.getCentreY();
-    const float halfH = area.getHeight() * 0.49f;
+    const float halfH = area.getHeight() * 0.38f;
     for (int x = 0; x < width; ++x) {
         const float peak = juce::jlimit(0.0f, 1.0f, peaks[static_cast<std::size_t>(x)] / maxPeak);
         const float px = area.getX() + static_cast<float>(x);
@@ -237,7 +296,7 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
 
     g.setColour(juce::Colour(0xb8ffffff));
     const float midY = wave.getCentreY();
-    const float halfH = wave.getHeight() * 0.49f;
+    const float halfH = wave.getHeight() * 0.42f;
     const int pixelColumns = std::max(1, static_cast<int>(wave.getWidth()));
     const int peakColumns = static_cast<int>(clip.waveformPeaks.size());
     const double sourceDuration = std::max(0.001, clip.sourceDurationSeconds());
