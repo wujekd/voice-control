@@ -27,7 +27,7 @@ public:
     void mouseUp(const juce::MouseEvent& e) override;
 
 private:
-    enum class DragMode { None, Move, ResizeLeft, ResizeRight, FadeIn, FadeOut };
+    enum class DragMode { None, Move, Slip, ResizeLeft, ResizeRight, FadeIn, FadeOut };
 
     double secondsToX(double seconds) const;
     double xToSeconds(double x) const;

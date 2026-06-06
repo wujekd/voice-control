@@ -8,6 +8,15 @@ constexpr float kClipEdgeGripTopInset = 16.0f;
 constexpr float kClipEdgeGripWidth = 7.0f;
 constexpr float kClipEdgeHitTopInset = 10.0f;
 constexpr float kClipEdgeHitWidth = 16.0f;
+constexpr float kVoiceLaneHeight = 88.0f;
+constexpr int kMusicLaneHeight = 84;
+
+void drawLaneLabel(juce::Graphics& g, juce::Rectangle<float> lane, const juce::String& text) {
+    auto label = juce::Rectangle<float>(lane.getX() + 8.0f, lane.getBottom() - 26.0f,
+                                        150.0f, 20.0f);
+    g.setColour(juce::Colour(0xffa8b0bd).withAlpha(0.88f));
+    g.drawText(text, label, juce::Justification::centredLeft);
+}
 }
 
 void MusicTimeline::setVoice(const juce::AudioBuffer<float>* voice, double sampleRate) {
@@ -38,11 +47,11 @@ juce::Rectangle<float> MusicTimeline::timelineBounds() const {
 }
 
 juce::Rectangle<float> MusicTimeline::voiceLaneBounds() const {
-    return timelineBounds().removeFromTop(58.0f);
+    return timelineBounds().removeFromTop(kVoiceLaneHeight);
 }
 
 juce::Rectangle<float> MusicTimeline::musicLaneBounds() const {
-    return getLocalBounds().reduced(10).removeFromBottom(48).toFloat();
+    return getLocalBounds().reduced(10).removeFromBottom(kMusicLaneHeight).toFloat();
 }
 
 double MusicTimeline::secondsToX(double seconds) const {
@@ -71,7 +80,7 @@ juce::Rectangle<float> MusicTimeline::clipBounds(int index) const {
         return {};
     const float x1 = static_cast<float>(secondsToX(start));
     const float x2 = static_cast<float>(secondsToX(end));
-    return { x1, lane.getY() + 5.0f, std::max(8.0f, x2 - x1), lane.getHeight() - 10.0f };
+    return { x1, lane.getY() + 1.0f, std::max(8.0f, x2 - x1), lane.getHeight() - 2.0f };
 }
 
 juce::Rectangle<float> MusicTimeline::removeButtonBounds(int index) const {
@@ -189,8 +198,8 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
     const int samples = voice_->getNumSamples();
     const int channels = voice_->getNumChannels();
     const int width = std::max(1, static_cast<int>(area.getWidth()));
-    const float base = area.getBottom() - 4.0f;
-    const float scale = area.getHeight() * 0.95f;
+    std::vector<float> peaks(static_cast<std::size_t>(width), 0.0f);
+    float maxPeak = 0.001f;
 
     for (int x = 0; x < width; ++x) {
         const int s0 = static_cast<int>(static_cast<int64_t>(x) * samples / width);
@@ -204,13 +213,21 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
             mono /= static_cast<float>(std::max(1, channels));
             peak = std::max(peak, std::abs(mono));
         }
+        peaks[static_cast<std::size_t>(x)] = peak;
+        maxPeak = std::max(maxPeak, peak);
+    }
+
+    const float midY = area.getCentreY();
+    const float halfH = area.getHeight() * 0.49f;
+    for (int x = 0; x < width; ++x) {
+        const float peak = juce::jlimit(0.0f, 1.0f, peaks[static_cast<std::size_t>(x)] / maxPeak);
         const float px = area.getX() + static_cast<float>(x);
-        g.drawVerticalLine(static_cast<int>(px), base - peak * scale, base);
+        g.drawVerticalLine(static_cast<int>(px), midY - peak * halfH, midY + peak * halfH);
     }
 }
 
 void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, juce::Rectangle<float> area) {
-    auto wave = area.reduced(7.0f, 8.0f);
+    auto wave = area.reduced(7.0f, 2.0f);
     if (wave.getWidth() < 3.0f || wave.getHeight() < 3.0f || clip.waveformPeaks.empty())
         return;
 
@@ -218,14 +235,25 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
     if (columns <= 0)
         return;
 
-    g.setColour(juce::Colour(0x55ffffff));
+    g.setColour(juce::Colour(0xb8ffffff));
     const float midY = wave.getCentreY();
-    const float halfH = wave.getHeight() * 0.46f;
+    const float halfH = wave.getHeight() * 0.49f;
     const int pixelColumns = std::max(1, static_cast<int>(wave.getWidth()));
     const int peakColumns = static_cast<int>(clip.waveformPeaks.size());
     const double sourceDuration = std::max(0.001, clip.sourceDurationSeconds());
     const double offsetFraction = juce::jlimit(0.0, 1.0, clip.sourceOffsetSeconds / sourceDuration);
     const double visibleFraction = juce::jlimit(0.0, 1.0, clip.durationSeconds() / sourceDuration);
+
+    float maxPeak = 0.001f;
+    for (int x = 0; x < pixelColumns; ++x) {
+        const double visiblePos = static_cast<double>(x) / static_cast<double>(pixelColumns);
+        const int col = static_cast<int>((offsetFraction + visiblePos * visibleFraction)
+                                         * static_cast<double>(peakColumns));
+        if (col >= columns)
+            break;
+        maxPeak = std::max(maxPeak, clip.waveformPeaks[static_cast<std::size_t>(col)]);
+    }
+
     for (int x = 0; x < pixelColumns; ++x) {
         const double visiblePos = static_cast<double>(x) / static_cast<double>(pixelColumns);
         const int col = static_cast<int>((offsetFraction + visiblePos * visibleFraction)
@@ -233,8 +261,11 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
         if (col >= columns)
             break;
         const float peak = clip.waveformPeaks[static_cast<std::size_t>(col)];
+        const float normalizedPeak = juce::jlimit(0.0f, 1.0f, peak / maxPeak);
         const float px = wave.getX() + static_cast<float>(x);
-        g.drawVerticalLine(static_cast<int>(px), midY - peak * halfH, midY + peak * halfH);
+        g.drawVerticalLine(static_cast<int>(px),
+                           midY - normalizedPeak * halfH,
+                           midY + normalizedPeak * halfH);
     }
 }
 
@@ -324,8 +355,7 @@ void MusicTimeline::drawGapPluses(juce::Graphics& g) {
     }
     std::sort(ranges.begin(), ranges.end());
 
-    // Keep the gap "+" below the fade-handle row so it doesn't overlap a clip's fade-out dot.
-    const float plusY = lane.getBottom() - 14.0f;
+    const float plusY = lane.getCentreY();
     double cursor = 0.0;
     bool drew = false;
     for (const auto& r : ranges) {
@@ -351,17 +381,15 @@ void MusicTimeline::drawGapPluses(juce::Graphics& g) {
 void MusicTimeline::paint(juce::Graphics& g) {
     g.fillAll(juce::Colour(0xff252932));
     auto r = timelineBounds();
-    auto voiceLane = r.removeFromTop(58.0f);
+    auto voiceLane = r.removeFromTop(kVoiceLaneHeight);
     auto musicLane = musicLaneBounds();
 
-    g.setColour(juce::Colour(0xffa8b0bd));
-    g.drawText("Voice waveform", voiceLane.removeFromTop(16.0f), juce::Justification::centredLeft);
     drawWaveform(g, voiceLane);
+    drawLaneLabel(g, voiceLane, "Voice waveform");
 
     g.setColour(juce::Colour(0xff303640));
     g.fillRoundedRectangle(musicLane, 4.0f);
-    g.setColour(juce::Colour(0xffa8b0bd));
-    g.drawText("Music", musicLane.removeFromLeft(50.0f), juce::Justification::centredLeft);
+    drawLaneLabel(g, musicLane, "Music");
     drawGapPluses(g);
 
     if (clips_ != nullptr) {
@@ -389,7 +417,8 @@ void MusicTimeline::paint(juce::Graphics& g) {
             }
             const bool overlaps = overlapR > overlapL;
 
-            g.setColour(i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9));
+            g.setColour((i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9))
+                            .withAlpha(i == selectedIndex_ ? 0.24f : 0.12f));
             if (overlaps) {
                 const juce::Rectangle<int> overlapRect(
                     juce::Rectangle<float>(overlapL, b.getY(), overlapR - overlapL, b.getHeight())
@@ -403,7 +432,7 @@ void MusicTimeline::paint(juce::Graphics& g) {
                     juce::Graphics::ScopedSaveState s(g);
                     g.reduceClipRegion(overlapRect);
                     g.setColour((i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9))
-                                    .withAlpha(0.42f));
+                                    .withAlpha(i == selectedIndex_ ? 0.14f : 0.06f));
                     g.fillRoundedRectangle(b, 4.0f);
                 }
             } else {
@@ -411,8 +440,9 @@ void MusicTimeline::paint(juce::Graphics& g) {
             }
 
             drawClipWaveform(g, (*clips_)[static_cast<std::size_t>(i)], b);
-            g.setColour(juce::Colours::white);
             auto labelBounds = b.reduced(6, 0);
+            labelBounds.setY(b.getBottom() - 23.0f);
+            labelBounds.setHeight(20.0f);
             float labelClearX = labelBounds.getX();
             for (int j = 0; j < count; ++j) {
                 if (j == i)
@@ -432,6 +462,9 @@ void MusicTimeline::paint(juce::Graphics& g) {
             }
             if (labelClearX > labelBounds.getX() && labelBounds.getWidth() > 8.0f)
                 labelBounds.setLeft(std::min(labelClearX, labelBounds.getRight() - 8.0f));
+            g.setColour(juce::Colours::black.withAlpha(0.38f));
+            g.fillRoundedRectangle(labelBounds.expanded(3.0f, 1.0f), 3.0f);
+            g.setColour(juce::Colours::white.withAlpha(0.94f));
             g.drawText((*clips_)[static_cast<std::size_t>(i)].name, labelBounds, juce::Justification::centredLeft);
             g.setColour(juce::Colour(0xaa101217));
             const auto edgeGripY = std::min(b.getBottom(), b.getY() + kClipEdgeGripTopInset);
@@ -461,9 +494,9 @@ void MusicTimeline::paint(juce::Graphics& g) {
     }
 
     const float playheadX = static_cast<float>(secondsToX(playheadSeconds_));
-    g.setColour(juce::Colour(0xffff5d5d));
-    g.drawLine(playheadX, timelineBounds().getY() + 16.0f,
-               playheadX, timelineBounds().getBottom(), 2.0f);
+    g.setColour(juce::Colour(0xff6ee07a));
+    g.drawLine(playheadX, timelineBounds().getY(),
+               playheadX, timelineBounds().getBottom(), 2.5f);
 }
 
 void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
@@ -553,6 +586,8 @@ void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
             dragMode_ = DragMode::ResizeLeft;
         else if (inEdgeGripRow && p.x >= b.getRight() - kClipEdgeHitWidth)
             dragMode_ = DragMode::ResizeRight;
+        else if (e.mods.isShiftDown())
+            dragMode_ = DragMode::Slip;
         else
             dragMode_ = DragMode::Move;
         if (onClipDragStateChanged)
@@ -598,6 +633,11 @@ void MusicTimeline::mouseDrag(const juce::MouseEvent& e) {
     if (dragMode_ == DragMode::Move) {
         start = juce::jlimit(0.0, std::max(0.0, timelineLength - length), dragStartSeconds_ + delta);
         sourceOffset = dragSourceOffsetSeconds_;
+    } else if (dragMode_ == DragMode::Slip) {
+        start = dragStartSeconds_;
+        length = dragLengthSeconds_;
+        const double maxOffset = std::max(0.0, sourceLength - length);
+        sourceOffset = juce::jlimit(0.0, maxOffset, dragSourceOffsetSeconds_ - delta);
     } else if (dragMode_ == DragMode::ResizeRight) {
         sourceOffset = dragSourceOffsetSeconds_;
         length = juce::jlimit(0.1, std::min(sourceLength - sourceOffset, timelineLength - start),
