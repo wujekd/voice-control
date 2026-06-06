@@ -3,6 +3,20 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+constexpr int kDefaultWindowWidth = 920;
+constexpr int kOuterMargin = 16;
+constexpr int kBottomBreathingRoom = 18;
+constexpr int kDefaultWindowHeight = kOuterMargin * 2
+    + (20 + 2 + 20 + 2 + 20 + 2 + 20 + 12 + 30 + 10) // meters
+    + (138 + 8)                                      // main controls
+    + (112 + 6)                                      // spectrum
+    + (200 + 8)                                      // timeline
+    + (116 + 8)                                      // music controls
+    + (18 + 4 + 40)                                  // progress + status
+    + kBottomBreathingRoom;
+}
+
 void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     juce::Graphics& g, int x, int y, int width, int height, float sliderPosProportional,
     float rotaryStartAngle, float rotaryEndAngle, juce::Slider& slider) {
@@ -185,25 +199,33 @@ MainComponent::MainComponent() {
     musicCaption_.setText("Backing Music", juce::dontSendNotification);
     addAndMakeVisible(musicCaption_);
 
+    // Add / remove / clip selection are now driven from the timeline. The
+    // controls remain as hidden state-holders (the timeline still sets the
+    // selected clip through musicClipBox_) but no longer appear in the GUI.
     addMusicButton_.onClick = [this] { addMusicClip(nextMusicClipStartSeconds()); };
     addMusicButton_.setWantsKeyboardFocus(false);
-    addAndMakeVisible(addMusicButton_);
+    addChildComponent(addMusicButton_);
+    addMusicButton_.setVisible(false);
 
     removeMusicButton_.onClick = [this] { removeSelectedMusicClip(); };
     removeMusicButton_.setWantsKeyboardFocus(false);
-    addAndMakeVisible(removeMusicButton_);
+    addChildComponent(removeMusicButton_);
+    removeMusicButton_.setVisible(false);
 
     musicClipBox_.onChange = [this] {
         syncMusicControlsFromSelection();
         updateMusicTimeline();
     };
-    addAndMakeVisible(musicClipBox_);
+    addChildComponent(musicClipBox_);
+    musicClipBox_.setVisible(false);
 
     musicStartLabel_.setText("Start", juce::dontSendNotification);
-    musicVolumeLabel_.setText("Volume", juce::dontSendNotification);
+    musicMasterVolumeLabel_.setText("Music Volume", juce::dontSendNotification);
+    musicVolumeLabel_.setText("Clip Volume", juce::dontSendNotification);
     musicFadeInLabel_.setText("Fade in", juce::dontSendNotification);
     musicFadeOutLabel_.setText("Fade out", juce::dontSendNotification);
-    for (auto* label : { &musicStartLabel_, &musicVolumeLabel_, &musicFadeInLabel_, &musicFadeOutLabel_ })
+    for (auto* label : { &musicStartLabel_, &musicMasterVolumeLabel_, &musicVolumeLabel_,
+                         &musicFadeInLabel_, &musicFadeOutLabel_ })
         addAndMakeVisible(label);
 
     auto configureMusicSlider = [this, configureEncoder](juce::Slider& slider, double min, double max,
@@ -218,10 +240,46 @@ MainComponent::MainComponent() {
         addAndMakeVisible(slider);
     };
     configureMusicSlider(musicStartSlider_, 0.0, 600.0, 0.1, 0.0, " s");
+    configureMusicSlider(musicMasterVolumeSlider_, -60.0, 6.0, 0.5, 0.0, " dB");
     configureMusicSlider(musicVolumeSlider_, -60.0, 6.0, 0.5, -18.0, " dB");
     configureMusicSlider(musicFadeInSlider_, 0.0, 20.0, 0.1, 1.0, " s");
     configureMusicSlider(musicFadeOutSlider_, 0.0, 20.0, 0.1, 1.0, " s");
+    musicMasterVolumeSlider_.onDragStart = {};
+    musicMasterVolumeSlider_.onDragEnd = {};
+    musicMasterVolumeSlider_.onValueChange = [this] { applyMusicMasterVolume(); };
     musicVolumeSlider_.onValueChange = [this] { applySelectedMusicClipVolume(); };
+
+    // Background ducking (sketch): knobs only for now, not yet wired to DSP.
+    // Look-ahead and reduction behave like a sidechain compressor; the filter
+    // lets it act more like a dynamic EQ than a full-band compressor.
+    duckCaption_.setText("Ducking", juce::dontSendNotification);
+    addAndMakeVisible(duckCaption_);
+    duckLookAheadLabel_.setText("Look-ahead", juce::dontSendNotification);
+    duckReductionLabel_.setText("Reduction", juce::dontSendNotification);
+    duckFilterLabel_.setText("Filter", juce::dontSendNotification);
+    for (auto* label : { &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ })
+        addAndMakeVisible(label);
+
+    auto configureDuckSlider = [this, configureEncoder](juce::Slider& slider, double min, double max,
+                                      double step, double value, const juce::String& suffix) {
+        slider.setRange(min, max, step);
+        slider.setValue(value, juce::dontSendNotification);
+        slider.setTextValueSuffix(suffix);
+        configureEncoder(slider);
+        addAndMakeVisible(slider);
+    };
+    configureDuckSlider(duckLookAheadSlider_, 0.0, 50.0, 1.0, 5.0, " ms");
+    configureDuckSlider(duckReductionSlider_, 0.0, 24.0, 0.5, 9.0, " dB");
+    configureDuckSlider(duckFilterSlider_, 100.0, 8000.0, 10.0, 800.0, " Hz");
+
+    // Start, fade in and fade out are now adjusted on the timeline; these
+    // controls stay as hidden mirrors of the selected clip's values.
+    musicStartLabel_.setVisible(false);
+    musicStartSlider_.setVisible(false);
+    musicFadeInLabel_.setVisible(false);
+    musicFadeInSlider_.setVisible(false);
+    musicFadeOutLabel_.setVisible(false);
+    musicFadeOutSlider_.setVisible(false);
 
     musicTimeline_.onAddAt = [this](double seconds) { addMusicClip(seconds); };
     musicTimeline_.onSeek = [this](double seconds) {
@@ -300,7 +358,8 @@ MainComponent::MainComponent() {
     addMusicButton_.setEnabled(true);
     removeMusicButton_.setEnabled(false);
     musicClipBox_.setEnabled(false);
-    for (auto* s : { &musicStartSlider_, &musicVolumeSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
+    for (auto* s : { &musicStartSlider_, &musicMasterVolumeSlider_, &musicVolumeSlider_,
+                     &musicFadeInSlider_, &musicFadeOutSlider_ })
         s->setEnabled(false);
     exportButton_.setEnabled(false);
     noiseReductionSlider_.setEnabled(false);
@@ -324,7 +383,7 @@ MainComponent::MainComponent() {
     deviceManager_.addChangeListener(this);
 
     startTimerHz(30);
-    setSize(920, 994);
+    setSize(kDefaultWindowWidth, kDefaultWindowHeight);
     grabKeyboardFocus();
 }
 
@@ -338,8 +397,9 @@ MainComponent::~MainComponent() {
                      &fastThresholdSlider_, &fastRatioSlider_, &glueThresholdSlider_,
                      &glueRatioSlider_, &targetPreChainSlider_, &deEssFreqSlider_,
                      &deEssThresholdSlider_, &deEssPresenceSlider_, &deEssRatioSlider_,
-                     &deEssRangeSlider_, &musicStartSlider_, &musicVolumeSlider_,
-                     &musicFadeInSlider_, &musicFadeOutSlider_ })
+                     &deEssRangeSlider_, &musicStartSlider_, &musicMasterVolumeSlider_, &musicVolumeSlider_,
+                     &musicFadeInSlider_, &musicFadeOutSlider_,
+                     &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
         s->setLookAndFeel(nullptr);
 
     stopTimer();
@@ -410,8 +470,10 @@ void MainComponent::syncMusicControlsFromSelection() {
     const bool valid = index >= 0 && index < static_cast<int>(clips.size());
     removeMusicButton_.setEnabled(!busy_.load() && valid);
     musicClipBox_.setEnabled(!busy_.load() && !clips.empty());
+    musicMasterVolumeSlider_.setEnabled(!busy_.load() && !clips.empty());
     for (auto* s : { &musicStartSlider_, &musicVolumeSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
         s->setEnabled(!busy_.load() && valid);
+    musicMasterVolumeSlider_.setValue(engine_.musicMasterGainDb(), juce::dontSendNotification);
 
     if (!valid)
         return;
@@ -456,6 +518,12 @@ void MainComponent::applySelectedMusicClipVolume() {
     engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, gainDb,
                                clip.fadeInSeconds, clip.fadeOutSeconds, clip.durationSeconds());
     player_.setMusicClipGainDb(index, gainDb);
+}
+
+void MainComponent::applyMusicMasterVolume() {
+    const double gainDb = musicMasterVolumeSlider_.getValue();
+    engine_.setMusicMasterGainDb(gainDb);
+    player_.setMusicMasterGainDb(gainDb);
 }
 
 void MainComponent::pushMusicUndoState() {
@@ -926,8 +994,7 @@ void MainComponent::loadFile(const juce::File& file) {
             exportButton_.setEnabled(true);
             addMusicButton_.setEnabled(true);
             refreshMusicClipList();
-            exportButton_.setButtonText(engine_.sourceHasVideo() ? "Export video..."
-                                                                 : "Export audio...");
+            exportButton_.setButtonText("Export");
             dropArea_.setStatus(file.getFileName());
             spectrumView_.setSpectrum(engine_.spectrum());
             updateEqView();
@@ -1057,7 +1124,9 @@ void MainComponent::updateListenButton() {
     const bool bypass = listenButton_.getToggleState();
     player_.setShowAfter(!bypass); // bypass -> hear the original, unprocessed voice
     listenButton_.setButtonText("Bypass");
-    const auto col = bypass ? juce::Colour(0xffb5852a) : juce::Colour(0xff3a3f49);
+    // Active bypass glows a muted, faded red (echoing the timeline's washed-out clips);
+    // inactive falls back to the neutral button grey.
+    const auto col = bypass ? juce::Colour(0xff7d2f2f) : juce::Colour(0xff3a3f49);
     listenButton_.setColour(juce::TextButton::buttonColourId, col);
     listenButton_.setColour(juce::TextButton::buttonOnColourId, col);
 }
@@ -1084,13 +1153,18 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
 void MainComponent::timerCallback() {
     const bool playing = player_.isPlaying();
     playButton_.setButtonText(playing ? "Stop" : "Play");
+    // Gentle green backlight while playing (matching the encoders' green); neutral grey otherwise.
+    const auto playCol = playing ? juce::Colour(0xff2f7d52) : juce::Colour(0xff3a3f49);
+    playButton_.setColour(juce::TextButton::buttonColourId, playCol);
+    playButton_.setColour(juce::TextButton::buttonOnColourId, playCol);
 
     // Meters reflect the live chain while playing; ease back to 0 when stopped.
     fastCompMeter_.setReduction(playing ? player_.fastCompReductionDb() : 0.0f);
     glueCompMeter_.setReduction(playing ? player_.glueCompReductionDb() : 0.0f);
     deEssMeter_.setReduction(playing ? player_.deEssReductionDb() : 0.0f);
     limiterMeter_.setReduction(playing ? player_.limiterReductionDb() : 0.0f);
-    vuMeter_.setLevelDb(playing ? player_.rmsLevelDb() : -60.0f);
+    vuMeter_.setLevels(playing ? player_.rmsLevelDb() : -60.0f,
+                       playing ? player_.peakLevelDb() : -60.0f);
 
     // Animate the spectrum to the playing audio; revert to the average when idle.
     if (playing)
@@ -1098,7 +1172,7 @@ void MainComponent::timerCallback() {
     else
         spectrumView_.setShowLive(false);
 
-    if (engine_.processMusicWaveformChunks(48))
+    if (engine_.processMusicWaveformChunks(256))
         updateMusicTimeline();
 
     startProcessedSpectrumUpdateIfNeeded();
@@ -1133,60 +1207,95 @@ void MainComponent::resized() {
         r.removeFromTop(8);
     }
 
+    // Live gain-reduction meters.
+    fastCompMeter_.setBounds(r.removeFromTop(20));
+    r.removeFromTop(2);
+    glueCompMeter_.setBounds(r.removeFromTop(20));
+    r.removeFromTop(2);
+    deEssMeter_.setBounds(r.removeFromTop(20));
+    r.removeFromTop(2);
+    limiterMeter_.setBounds(r.removeFromTop(20));
+    r.removeFromTop(12);
+    vuMeter_.setBounds(r.removeFromTop(30));
+    r.removeFromTop(10);
+
     auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider) {
         label.setBounds(area.removeFromTop(20));
         slider.setBounds(area);
     };
 
     auto encoderRow = r.removeFromTop(138);
-    constexpr int encoderWidth = 170;
-    constexpr int encoderGap = 58;
-    const int totalEncoderWidth = encoderWidth * 3 + encoderGap * 2;
-    auto centeredEncoders = encoderRow.withSizeKeepingCentre(
-        juce::jmin(totalEncoderWidth, encoderRow.getWidth()), encoderRow.getHeight());
-    auto noiseArea = centeredEncoders.removeFromLeft(encoderWidth);
-    centeredEncoders.removeFromLeft(encoderGap);
-    auto strengthArea = centeredEncoders.removeFromLeft(encoderWidth);
-    centeredEncoders.removeFromLeft(encoderGap);
-    auto toneArea = centeredEncoders.removeFromLeft(encoderWidth);
-    placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
+
+    // Five elements laid out left-to-right with one consistent gap so the space
+    // between the buttons and the encoders matches the gaps between encoders:
+    // play/bypass column, Intensity, Tone, Noise Reduction, Export.
+    constexpr int buttonColWidth = 108;
+    constexpr int encoderWidth = 156;
+    constexpr int exportWidth = 104;
+    constexpr int elementGap = 42;
+    const int groupWidth = buttonColWidth + exportWidth + encoderWidth * 3 + elementGap * 4;
+    auto group = encoderRow.withSizeKeepingCentre(
+        juce::jmin(groupWidth, encoderRow.getWidth()), encoderRow.getHeight());
+
+    auto mainTransport = group.removeFromLeft(buttonColWidth).reduced(2, 4);
+    playButton_.setBounds(mainTransport.removeFromTop(82));
+    mainTransport.removeFromTop(8);
+    listenButton_.setBounds(mainTransport.removeFromTop(36));
+    group.removeFromLeft(elementGap);
+
+    // Export sits on the far right and spans the full combined height of the
+    // play + bypass column.
+    auto exportArea = group.removeFromRight(exportWidth).reduced(2, 4);
+    exportButton_.setBounds(exportArea);
+    group.removeFromRight(elementGap);
+
+    auto strengthArea = group.removeFromLeft(encoderWidth);
+    group.removeFromLeft(elementGap);
+    auto toneArea = group.removeFromLeft(encoderWidth);
+    group.removeFromLeft(elementGap);
+    auto noiseArea = group.removeFromLeft(encoderWidth);
     placeEncoder(strengthArea, strengthCaption_, strengthSlider_);
     placeEncoder(toneArea, toneCaption_, toneSlider_);
+    placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
     r.removeFromTop(8);
 
-    spectrumView_.setBounds(r.removeFromTop(150));
+    spectrumView_.setBounds(r.removeFromTop(112));
     r.removeFromTop(6);
 
-    auto timelineBounds = r.removeFromTop(150);
+    auto timelineBounds = r.removeFromTop(200);
     musicTimeline_.setBounds(timelineBounds);
     // The voice drop field covers only the voice lane (top), leaving the music
     // lane below clickable so its own "+" adds a music clip. Matches
-    // MusicTimeline's internal lane layout: reduced(10), 58px voice lane with a
-    // 16px label above the waveform.
-    auto voiceLane = timelineBounds.reduced(10).removeFromTop(58);
-    voiceLane.removeFromTop(16);
+    // MusicTimeline's internal lane layout: reduced(10), 88px voice lane.
+    auto voiceLane = timelineBounds.reduced(10).removeFromTop(88);
     dropArea_.setBounds(voiceLane);
     dropArea_.setVisible(analyzingMedia_ || !engine_.hasAudio());
     dropArea_.toFront(false);
     r.removeFromTop(8);
 
-    auto musicArea = r.removeFromTop(166);
-    musicCaption_.setBounds(musicArea.removeFromTop(20));
-    auto musicTop = musicArea.removeFromTop(30);
-    addMusicButton_.setBounds(musicTop.removeFromLeft(116).reduced(2));
-    removeMusicButton_.setBounds(musicTop.removeFromRight(86).reduced(2));
-    musicClipBox_.setBounds(musicTop.reduced(2));
-    musicArea.removeFromTop(6);
-    auto musicControls = musicArea.removeFromTop(110);
-    auto musicCellWidth = musicControls.getWidth() / 4;
-    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
-                 musicStartLabel_, musicStartSlider_);
-    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
+    // Add / remove / clip selection moved to the timeline. The left of this row
+    // holds the backing-music volume knobs; the right holds the background
+    // ducking section.
+    auto musicArea = r.removeFromTop(116);
+    auto captionRow = musicArea.removeFromTop(20);
+    auto musicRow = musicArea;
+    constexpr int knobWidth = 96;
+
+    auto volumeArea = musicRow.removeFromLeft(knobWidth * 2);
+    musicCaption_.setBounds(captionRow.removeFromLeft(knobWidth * 2));
+    placeEncoder(volumeArea.removeFromLeft(knobWidth).reduced(4, 0),
+                 musicMasterVolumeLabel_, musicMasterVolumeSlider_);
+    placeEncoder(volumeArea.reduced(4, 0),
                  musicVolumeLabel_, musicVolumeSlider_);
-    placeEncoder(musicControls.removeFromLeft(musicCellWidth).reduced(4, 0),
-                 musicFadeInLabel_, musicFadeInSlider_);
-    placeEncoder(musicControls.reduced(4, 0),
-                 musicFadeOutLabel_, musicFadeOutSlider_);
+
+    auto duckArea = musicRow.removeFromRight(knobWidth * 3);
+    duckCaption_.setBounds(captionRow.removeFromRight(knobWidth * 3));
+    placeEncoder(duckArea.removeFromLeft(knobWidth).reduced(4, 0),
+                 duckLookAheadLabel_, duckLookAheadSlider_);
+    placeEncoder(duckArea.removeFromLeft(knobWidth).reduced(4, 0),
+                 duckReductionLabel_, duckReductionSlider_);
+    placeEncoder(duckArea.reduced(4, 0),
+                 duckFilterLabel_, duckFilterSlider_);
     r.removeFromTop(8);
 
     if (proPanelVisible_) {
@@ -1214,26 +1323,6 @@ void MainComponent::resized() {
         resetProButton_.setBounds(proArea.removeFromTop(28).removeFromRight(90));
         r.removeFromTop(8);
     }
-
-    auto transport = r.removeFromTop(44);
-    listenButton_.setBounds(transport.removeFromRight(96).reduced(2));
-    playButton_.setBounds(transport.reduced(2));
-    r.removeFromTop(10);
-
-    // Live gain-reduction meters.
-    fastCompMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    glueCompMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    deEssMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    limiterMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(12);
-    vuMeter_.setBounds(r.removeFromTop(22));
-    r.removeFromTop(10);
-
-    exportButton_.setBounds(r.removeFromTop(38).reduced(2));
-    r.removeFromTop(8);
 
     progressBar_.setBounds(r.removeFromTop(18));
     r.removeFromTop(4);

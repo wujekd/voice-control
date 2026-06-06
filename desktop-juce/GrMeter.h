@@ -33,7 +33,7 @@ public:
         const float frac = maxDb_ > 0.0f ? (displayed_ / maxDb_) : 0.0f;
         if (frac > 0.001f) {
             auto fill = track.withWidth(track.getWidth() * frac);
-            g.setColour(colour_);
+            g.setColour(colour_.withAlpha(0.62f));
             g.fillRoundedRectangle(fill, 3.0f);
         }
 
@@ -50,17 +50,38 @@ private:
     float displayed_ = 0.0f;
 };
 
-// Horizontal RMS/VU level meter. Shows dBFS from silence up to 0 dBFS with
-// slower easing than the gain-reduction meters, so it reads like average level
-// rather than sample peaks.
+// Horizontal level meter. Two layers share one bar: a lighter-green peak layer
+// behind and a deep-green RMS (average) layer in front, so you can read both
+// average and peak at a glance. The numeric readout holds the highest peak for
+// a short while before easing back down, so brief transients stay visible.
 class VuMeter : public juce::Component {
 public:
     VuMeter(juce::String label, float minDb = -60.0f, float maxDb = 0.0f)
         : label_(std::move(label)), minDb_(minDb), maxDb_(maxDb) {}
 
-    void setLevelDb(float db) {
-        const float target = juce::jlimit(minDb_, maxDb_, db);
-        displayedDb_ += (target - displayedDb_) * (target > displayedDb_ ? 0.35f : 0.12f);
+    // Average level layer (deep green) — kept for compatibility.
+    void setLevelDb(float db) { setLevels(db, db); }
+
+    // Average (RMS) and peak in dBFS. RMS draws as the deep-green front layer,
+    // peak as the lighter-green back layer.
+    void setLevels(float rmsDb, float peakDb) {
+        const float rmsTarget = juce::jlimit(minDb_, maxDb_, rmsDb);
+        rmsDb_ += (rmsTarget - rmsDb_) * (rmsTarget > rmsDb_ ? 0.35f : 0.12f);
+
+        const float peakTarget = juce::jlimit(minDb_, maxDb_, peakDb);
+        peakDb_ += (peakTarget - peakDb_) * (peakTarget > peakDb_ ? 0.9f : 0.5f);
+
+        // Hold the highest peak for a moment, then let it ease back down so the
+        // readout doesn't snap away from a transient before you can see it.
+        if (peakDb_ >= holdDb_) {
+            holdDb_ = peakDb_;
+            holdFrames_ = 26; // ~kUiHz frames of hold before release begins
+        } else if (holdFrames_ > 0) {
+            --holdFrames_;
+        } else {
+            holdDb_ += (peakDb_ - holdDb_) * 0.08f;
+        }
+
         repaint();
     }
 
@@ -72,32 +93,41 @@ public:
         g.setFont(juce::Font(juce::FontOptions(12.0f)));
         g.drawText(label_, labelArea, juce::Justification::centredLeft);
 
-        auto track = r.reduced(0, 3).toFloat();
+        auto track = r.reduced(0, 1).toFloat();
         g.setColour(juce::Colour(0xff14161b));
         g.fillRoundedRectangle(track, 3.0f);
 
-        const float frac = (displayedDb_ - minDb_) / (maxDb_ - minDb_);
-        auto fill = track.withWidth(track.getWidth() * juce::jlimit(0.0f, 1.0f, frac));
-        if (fill.getWidth() > 1.0f) {
-            g.setColour(levelColour(displayedDb_));
-            g.fillRoundedRectangle(fill, 3.0f);
+        const float span = maxDb_ - minDb_;
+        const float peakFrac = juce::jlimit(0.0f, 1.0f, (peakDb_ - minDb_) / span);
+        const float rmsFrac = juce::jlimit(0.0f, 1.0f, (rmsDb_ - minDb_) / span);
+
+        // Peak layer (lighter green), behind.
+        if (peakFrac * track.getWidth() > 1.0f) {
+            g.setColour(kPeakGreen);
+            g.fillRoundedRectangle(track.withWidth(track.getWidth() * peakFrac), 3.0f);
+        }
+        // RMS layer (deep green), in front.
+        if (rmsFrac * track.getWidth() > 1.0f) {
+            g.setColour(kRmsGreen);
+            g.fillRoundedRectangle(track.withWidth(track.getWidth() * rmsFrac), 3.0f);
         }
 
         g.setColour(juce::Colours::white.withAlpha(0.85f));
         g.setFont(juce::Font(juce::FontOptions(11.0f)));
-        g.drawText(juce::String(displayedDb_, 1) + " dB", r,
+        g.drawText(juce::String(holdDb_, 1) + " dB", r,
                    juce::Justification::centredRight);
     }
 
 private:
-    static juce::Colour levelColour(float db) {
-        if (db > -6.0f) return juce::Colour(0xffff5d5d);
-        if (db > -18.0f) return juce::Colour(0xffffc14d);
-        return juce::Colour(0xff4fd37a);
-    }
+    // Deep green matches the encoder/potentiometer fill; peak is a lighter tint.
+    inline static const juce::Colour kRmsGreen { 0xff6ee07a };
+    inline static const juce::Colour kPeakGreen { 0xffaef0b4 };
 
     juce::String label_;
     float minDb_ = -60.0f;
     float maxDb_ = 0.0f;
-    float displayedDb_ = -60.0f;
+    float rmsDb_ = -60.0f;
+    float peakDb_ = -60.0f;
+    float holdDb_ = -60.0f;
+    int holdFrames_ = 0;
 };

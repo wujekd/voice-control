@@ -45,6 +45,11 @@ void PreviewPlayer::setMusicClipGainDb(int index, double gainDb) {
         std::memory_order_relaxed);
 }
 
+void PreviewPlayer::setMusicMasterGainDb(double gainDb) {
+    musicMasterGainDb_.store(static_cast<float>(juce::jlimit(-60.0, 6.0, gainDb)),
+                             std::memory_order_relaxed);
+}
+
 void PreviewPlayer::setNoiseReductionAmount(double amount) {
     noiseReductionAmount_.store(static_cast<float>(juce::jlimit(0.0, 1.0, amount)),
                                 std::memory_order_relaxed);
@@ -57,9 +62,13 @@ void PreviewPlayer::clearSources() {
     denoised_ = nullptr;
     musicClips_.clear();
     mutedMusicClipIndex_.store(-1, std::memory_order_relaxed);
+    musicMasterGainDb_.store(0.0f, std::memory_order_relaxed);
+    musicSmoothedMasterGain_ = 1.0f;
     readPos_ = 0.0;
     rmsLin_ = 0.0;
+    peakLin_ = 0.0;
     rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
+    peakLevelDb_.store(-90.0f, std::memory_order_relaxed);
 }
 
 void PreviewPlayer::start() {
@@ -72,6 +81,7 @@ void PreviewPlayer::start() {
 void PreviewPlayer::stop() {
     playing_.store(false);
     rmsLevelDb_.store(-90.0f, std::memory_order_relaxed);
+    peakLevelDb_.store(-90.0f, std::memory_order_relaxed);
 }
 
 double PreviewPlayer::getPositionNormalised() const {
@@ -102,6 +112,9 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
         return;
 
     const int mutedIndex = mutedMusicClipIndex_.load(std::memory_order_relaxed);
+    const float targetMasterGain = static_cast<float>(std::pow(
+        10.0, musicMasterGainDb_.load(std::memory_order_relaxed) / 20.0f));
+    const float gainStep = static_cast<float>(1.0 - std::exp(-1.0 / (deviceRate_ * 0.015)));
     for (int clipIndex = 0; clipIndex < static_cast<int>(musicClips_.size()); ++clipIndex) {
         if (clipIndex == mutedIndex)
             continue;
@@ -125,8 +138,8 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
         float gain = hasLiveGain
             ? musicSmoothedGain_[static_cast<std::size_t>(clipIndex)]
             : targetGain;
-        const float gainStep = static_cast<float>(1.0 - std::exp(-1.0 / (deviceRate_ * 0.015)));
         for (int i = 0; i < numSamples; ++i) {
+            musicSmoothedMasterGain_ += (targetMasterGain - musicSmoothedMasterGain_) * gainStep;
             if (hasLiveGain)
                 gain += (targetGain - gain) * gainStep;
 
@@ -149,7 +162,8 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
                 const int sc = juce::jmin(ch, clip.audio.getNumChannels() - 1);
                 const float* src = clip.audio.getReadPointer(sc);
                 const float sample = src[i0] + frac * (src[i0 + 1] - src[i0]);
-                dest.addSample(ch, startSample + i, sample * gain * static_cast<float>(fade));
+                dest.addSample(ch, startSample + i,
+                               sample * musicSmoothedMasterGain_ * gain * static_cast<float>(fade));
             }
         }
         if (hasLiveGain)
@@ -265,12 +279,14 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
 
     // 5. VU follows the full heard output, including backing music.
     double sumSquares = 0.0;
+    float blockPeak = 0.0f;
     for (int i = 0; i < produced; ++i) {
         float mono = 0.0f;
         for (int ch = 0; ch < outChannels; ++ch)
             mono += info.buffer->getSample(ch, info.startSample + i);
         mono /= static_cast<float>(juce::jmax(1, outChannels));
         sumSquares += static_cast<double>(mono) * mono;
+        blockPeak = juce::jmax(blockPeak, std::abs(mono));
     }
 
     const double blockRms = std::sqrt(sumSquares / juce::jmax(1, produced));
@@ -278,6 +294,14 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
     rmsLin_ = coeff * rmsLin_ + (1.0 - coeff) * blockRms;
     rmsLevelDb_.store(static_cast<float>(20.0 * std::log10(rmsLin_ + 1e-9)),
                       std::memory_order_relaxed);
+
+    // Peak follows with instant attack and a quick release so it snaps up to
+    // transients and falls back fast, sitting above the slower average level.
+    const double relCoeff = std::exp(-static_cast<double>(produced) / (deviceRate_ * 0.12));
+    if (blockPeak >= peakLin_) peakLin_ = blockPeak;
+    else peakLin_ = relCoeff * peakLin_ + (1.0 - relCoeff) * blockPeak;
+    peakLevelDb_.store(static_cast<float>(20.0 * std::log10(peakLin_ + 1e-9)),
+                       std::memory_order_relaxed);
 }
 
 void PreviewPlayer::readAnalysisBlock(float* dest, int n) const {

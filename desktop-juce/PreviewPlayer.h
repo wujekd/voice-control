@@ -29,6 +29,7 @@ public:
                            int numHops, int hopSize);
     void setMusicClips(const std::vector<MusicClip>& clips);
     void setMusicClipGainDb(int index, double gainDb);
+    void setMusicMasterGainDb(double gainDb);
     void setMutedMusicClipIndex(int index) { mutedMusicClipIndex_.store(index, std::memory_order_relaxed); }
     void clearSources();
 
@@ -62,6 +63,7 @@ public:
     float limiterReductionDb() const { return chain_.limiterReductionDb(); }
     double loudnessGainDb() const { return chain_.loudnessGainDb(); }
     float rmsLevelDb() const { return rmsLevelDb_.load(std::memory_order_relaxed); }
+    float peakLevelDb() const { return peakLevelDb_.load(std::memory_order_relaxed); }
 
     // AudioSource
     void prepareToPlay(int samplesPerBlock, double deviceSampleRate) override;
@@ -79,6 +81,8 @@ private:
     static constexpr int kMaxLiveMusicClips = 64;
     std::array<std::atomic<float>, kMaxLiveMusicClips> musicGainDb_;
     std::array<float, kMaxLiveMusicClips> musicSmoothedGain_;
+    std::atomic<float> musicMasterGainDb_ { 0.0f };
+    float musicSmoothedMasterGain_ = 1.0f;
 
     vc::LiveVoiceChain chain_;
     juce::AudioBuffer<float> scratch_; // wet render scratch, preallocated
@@ -88,12 +92,14 @@ private:
     std::atomic<int> mutedMusicClipIndex_ { -1 };
     std::atomic<float> noiseReductionAmount_ { 1.0f };
     std::atomic<float> rmsLevelDb_ { -90.0f };
+    std::atomic<float> peakLevelDb_ { -90.0f };
 
     double sourceRate_ = 48000.0;
     double deviceRate_ = 48000.0;
     int blockSize_ = 512;
     double readPos_ = 0.0; // source samples; audio thread only
     double rmsLin_ = 0.0;  // audio thread only
+    double peakLin_ = 0.0; // audio thread only
 
     void mixMusicInto(juce::AudioBuffer<float>& dest, int startSample, int numSamples,
                       double timelineStartSeconds);
