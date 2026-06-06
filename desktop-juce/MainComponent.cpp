@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 namespace {
 constexpr int kDefaultWindowWidth = 920;
@@ -10,11 +11,65 @@ constexpr int kBottomBreathingRoom = 18;
 constexpr int kDefaultWindowHeight = kOuterMargin * 2
     + (20 + 2 + 20 + 2 + 20 + 2 + 20 + 12 + 30 + 10) // meters
     + (138 + 8)                                      // main controls
-    + (112 + 6)                                      // spectrum
-    + (200 + 8)                                      // timeline
+    + (128 + 6)                                      // spectrum
+    + (216 + 8)                                      // timeline
     + (116 + 8)                                      // music controls
     + (18 + 4 + 40)                                  // progress + status
     + kBottomBreathingRoom;
+
+juce::File appDataDir() {
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Voice Control");
+    dir.createDirectory();
+    return dir;
+}
+
+juce::File autosaveProjectFile() {
+    return appDataDir().getChildFile("LastSession.vcproj");
+}
+
+// Managed project library: a single, fixed, user-visible folder. Projects are
+// saved here automatically so the user never picks a location.
+juce::File projectsFolder() {
+    auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+        .getChildFile("Voice Control Projects");
+    dir.createDirectory();
+    return dir;
+}
+
+// A non-colliding "<name>.vcproj" in the given folder ("Untitled", "Untitled 2"...).
+juce::File uniqueProjectFile(const juce::File& folder, const juce::String& baseName) {
+    auto safe = juce::File::createLegalFileName(baseName).trim();
+    if (safe.isEmpty())
+        safe = "Untitled";
+    auto file = folder.getChildFile(safe + ".vcproj");
+    for (int n = 2; file.existsAsFile(); ++n)
+        file = folder.getChildFile(safe + " " + juce::String(n) + ".vcproj");
+    return file;
+}
+
+double numberProperty(const juce::DynamicObject* obj, const juce::Identifier& id, double fallback) {
+    if (obj == nullptr || !obj->hasProperty(id))
+        return fallback;
+    return static_cast<double>(obj->getProperty(id));
+}
+
+juce::String stringProperty(const juce::DynamicObject* obj, const juce::Identifier& id,
+                            const juce::String& fallback = {}) {
+    if (obj == nullptr || !obj->hasProperty(id))
+        return fallback;
+    return obj->getProperty(id).toString();
+}
+
+void setSliderIfPresent(juce::Slider& slider, const juce::DynamicObject* obj,
+                        const juce::Identifier& id) {
+    if (obj != nullptr && obj->hasProperty(id))
+        slider.setValue(static_cast<double>(obj->getProperty(id)), juce::dontSendNotification);
+}
+
+void addNumber(juce::DynamicObject& obj, const juce::Identifier& id, double value) {
+    obj.setProperty(id, value);
+}
 }
 
 void MainComponent::EncoderLookAndFeel::drawRotarySlider(
@@ -96,7 +151,10 @@ MainComponent::MainComponent() {
     addChildComponent(outputDeviceBox_);
 
     addAndMakeVisible(dropArea_);
-    dropArea_.onFile = [this](const juce::File& f) { loadFile(f); };
+    dropArea_.onFile = [this](const juce::File& f) {
+        if (maybeSaveBeforeReplacingSession())
+            loadFile(f);
+    };
 
     addAndMakeVisible(spectrumView_);
 
@@ -215,6 +273,7 @@ MainComponent::MainComponent() {
     musicClipBox_.onChange = [this] {
         syncMusicControlsFromSelection();
         updateMusicTimeline();
+        markProjectDirty();
     };
     addChildComponent(musicClipBox_);
     musicClipBox_.setVisible(false);
@@ -249,14 +308,15 @@ MainComponent::MainComponent() {
     musicMasterVolumeSlider_.onValueChange = [this] { applyMusicMasterVolume(); };
     musicVolumeSlider_.onValueChange = [this] { applySelectedMusicClipVolume(); };
 
-    // Background ducking (sketch): knobs only for now, not yet wired to DSP.
-    // Look-ahead and reduction behave like a sidechain compressor; the filter
-    // lets it act more like a dynamic EQ than a full-band compressor.
+    // Background ducking: the voice sidechains the backing music. Look-ahead and
+    // reduction behave like a sidechain compressor; "Mid focus" blends from
+    // full-band ducking (0%) toward mid-band-only ducking (100%), so the music's
+    // low end and highs survive while the clashing mids duck.
     duckCaption_.setText("Ducking", juce::dontSendNotification);
     addAndMakeVisible(duckCaption_);
     duckLookAheadLabel_.setText("Look-ahead", juce::dontSendNotification);
     duckReductionLabel_.setText("Reduction", juce::dontSendNotification);
-    duckFilterLabel_.setText("Filter", juce::dontSendNotification);
+    duckFilterLabel_.setText("Mid focus", juce::dontSendNotification);
     for (auto* label : { &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ })
         addAndMakeVisible(label);
 
@@ -270,7 +330,14 @@ MainComponent::MainComponent() {
     };
     configureDuckSlider(duckLookAheadSlider_, 0.0, 50.0, 1.0, 5.0, " ms");
     configureDuckSlider(duckReductionSlider_, 0.0, 24.0, 0.5, 9.0, " dB");
-    configureDuckSlider(duckFilterSlider_, 100.0, 8000.0, 10.0, 800.0, " Hz");
+    configureDuckSlider(duckFilterSlider_, 0.0, 100.0, 1.0, 0.0, " %");
+    duckLookAheadSlider_.onValueChange = [this] { player_.setDuckLookAheadMs(duckLookAheadSlider_.getValue()); };
+    duckReductionSlider_.onValueChange = [this] { player_.setDuckReductionDb(duckReductionSlider_.getValue()); };
+    duckFilterSlider_.onValueChange = [this] { player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0); };
+    player_.setDuckLookAheadMs(duckLookAheadSlider_.getValue());
+    player_.setDuckReductionDb(duckReductionSlider_.getValue());
+    player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0);
+    addAndMakeVisible(duckView_);
 
     // Start, fade in and fade out are now adjusted on the timeline; these
     // controls stay as hidden mirrors of the selected clip's values.
@@ -333,6 +400,7 @@ MainComponent::MainComponent() {
         player_.setMusicClips(engine_.musicClips());
         syncMusicControlsFromSelection();
         updateMusicTimeline();
+        markProjectDirty();
     };
     addAndMakeVisible(musicTimeline_);
 
@@ -344,8 +412,7 @@ MainComponent::MainComponent() {
     statusLabel_.setText("Drop a video or audio file to begin.", juce::dontSendNotification);
     addAndMakeVisible(statusLabel_);
 
-    addAndMakeVisible(fastCompMeter_);
-    addAndMakeVisible(glueCompMeter_);
+    addAndMakeVisible(compMeter_);
     addAndMakeVisible(deEssMeter_);
     addAndMakeVisible(limiterMeter_);
     addAndMakeVisible(vuMeter_);
@@ -385,6 +452,10 @@ MainComponent::MainComponent() {
     startTimerHz(30);
     setSize(kDefaultWindowWidth, kDefaultWindowHeight);
     grabKeyboardFocus();
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
+        if (safe != nullptr)
+            safe->restoreAutosaveSession();
+    });
 }
 
 MainComponent::~MainComponent() {
@@ -411,6 +482,7 @@ MainComponent::~MainComponent() {
         spectrumWorker_.join();
     if (worker_.joinable())
         worker_.join();
+    saveAutosaveSession();
 }
 
 double MainComponent::currentToneAmount() const {
@@ -444,7 +516,7 @@ vc::ChainParams MainComponent::buildParams() const {
 
     p.autoEqEnabled = true;
     if (engine_.hasAudio())
-        p.autoEqBands = vc::computeAutoEqBands(engine_.spectrum(), p.baseAutoEqStrength);
+        p.autoEqBands = engine_.autoEqBands(p.baseAutoEqStrength);
 
     return p;
 }
@@ -502,6 +574,7 @@ void MainComponent::applySelectedMusicClipControls() {
                                clips[static_cast<std::size_t>(index)].durationSeconds());
     player_.setMusicClips(engine_.musicClips());
     updateMusicTimeline();
+    markProjectDirty();
 }
 
 void MainComponent::applySelectedMusicClipVolume() {
@@ -518,12 +591,14 @@ void MainComponent::applySelectedMusicClipVolume() {
     engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, gainDb,
                                clip.fadeInSeconds, clip.fadeOutSeconds, clip.durationSeconds());
     player_.setMusicClipGainDb(index, gainDb);
+    markProjectDirty();
 }
 
 void MainComponent::applyMusicMasterVolume() {
     const double gainDb = musicMasterVolumeSlider_.getValue();
     engine_.setMusicMasterGainDb(gainDb);
     player_.setMusicMasterGainDb(gainDb);
+    markProjectDirty();
 }
 
 void MainComponent::pushMusicUndoState() {
@@ -560,6 +635,7 @@ bool MainComponent::musicClipStateMatches(const MusicUndoState& state) const {
         const auto& a = clips[i];
         const auto& b = state.clips[i];
         if (a.name != b.name
+            || a.sourcePath != b.sourcePath
             || std::abs(a.sampleRate - b.sampleRate) > epsilon
             || std::abs(a.startSeconds - b.startSeconds) > epsilon
             || std::abs(a.sourceOffsetSeconds - b.sourceOffsetSeconds) > epsilon
@@ -597,6 +673,7 @@ void MainComponent::undoMusicTimelineEdit() {
     updateMusicTimeline();
     statusLabel_.setText("Undid music edit.", juce::dontSendNotification);
     applyingMusicUndo_ = false;
+    markProjectDirty();
 }
 
 void MainComponent::applyMusicClipOverlapCrossfades(int draggedIndex) {
@@ -673,6 +750,11 @@ void MainComponent::applyMusicClipOverlapCrossfades(int draggedIndex) {
 
 void MainComponent::updateMusicTimeline() {
     musicTimeline_.setVoice(engine_.hasAudio() ? &engine_.beforeBuffer() : nullptr, engine_.sampleRate());
+    musicTimeline_.setVoiceWaveformPeaks(
+        engine_.hasAudio() ? &engine_.voiceWaveformPeaks() : nullptr,
+        engine_.hasAudio() && !engine_.processedVoiceWaveformPeaks().empty()
+            ? &engine_.processedVoiceWaveformPeaks()
+            : nullptr);
     musicTimeline_.setClips(&engine_.musicClips(), musicClipBox_.getSelectedId() - 1);
 }
 
@@ -742,12 +824,17 @@ void MainComponent::updateMainMenu() {
 }
 
 juce::StringArray MainComponent::getMenuBarNames() {
-    return { "View" };
+    return { "File", "View" };
 }
 
 juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce::String&) {
     juce::PopupMenu menu;
     if (topLevelMenuIndex == 0) {
+        menu.addItem(newProjectMenuId, "New Project");
+        menu.addItem(openProjectManagerMenuId, "Projects...");
+        menu.addSeparator();
+        menu.addItem(saveProjectMenuId, "Save Project");
+    } else if (topLevelMenuIndex == 1) {
         menu.addItem(toggleSettingsMenuId, "Audio Output Settings", true, settingsPanelVisible_);
         menu.addItem(toggleProMenuId, "Pro Controls", true, proPanelVisible_);
     }
@@ -756,6 +843,15 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
 
 void MainComponent::menuItemSelected(int menuItemID, int) {
     switch (menuItemID) {
+        case newProjectMenuId:
+            newProject();
+            break;
+        case openProjectManagerMenuId:
+            openProjectManager();
+            break;
+        case saveProjectMenuId:
+            saveCurrentProject();
+            break;
         case toggleSettingsMenuId:
             setSettingsPanelVisible(!settingsPanelVisible_);
             break;
@@ -767,8 +863,355 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
     }
 }
 
+juce::var MainComponent::makeProjectState() const {
+    auto root = std::make_unique<juce::DynamicObject>();
+    root->setProperty("schemaVersion", 1);
+    root->setProperty("sourcePath", engine_.sourceFile().getFullPathName());
+    root->setProperty("projectPath", currentProjectFile_.getFullPathName());
+
+    auto controls = std::make_unique<juce::DynamicObject>();
+    addNumber(*controls, "tone", toneSlider_.getValue());
+    addNumber(*controls, "noiseReduction", noiseReductionSlider_.getValue());
+    addNumber(*controls, "intensity", strengthSlider_.getValue());
+    addNumber(*controls, "fastThreshold", fastThresholdSlider_.getValue());
+    addNumber(*controls, "fastRatio", fastRatioSlider_.getValue());
+    addNumber(*controls, "glueThreshold", glueThresholdSlider_.getValue());
+    addNumber(*controls, "glueRatio", glueRatioSlider_.getValue());
+    addNumber(*controls, "targetPreChain", targetPreChainSlider_.getValue());
+    addNumber(*controls, "deEssFreq", deEssFreqSlider_.getValue());
+    addNumber(*controls, "deEssThreshold", deEssThresholdSlider_.getValue());
+    addNumber(*controls, "deEssPresence", deEssPresenceSlider_.getValue());
+    addNumber(*controls, "deEssRatio", deEssRatioSlider_.getValue());
+    addNumber(*controls, "deEssRange", deEssRangeSlider_.getValue());
+    addNumber(*controls, "musicMasterGain", musicMasterVolumeSlider_.getValue());
+    addNumber(*controls, "duckLookAhead", duckLookAheadSlider_.getValue());
+    addNumber(*controls, "duckReduction", duckReductionSlider_.getValue());
+    addNumber(*controls, "duckBlend", duckFilterSlider_.getValue());
+    root->setProperty("controls", juce::var(controls.release()));
+
+    auto view = std::make_unique<juce::DynamicObject>();
+    view->setProperty("settingsPanelVisible", settingsPanelVisible_);
+    view->setProperty("proPanelVisible", proPanelVisible_);
+    root->setProperty("view", juce::var(view.release()));
+
+    juce::Array<juce::var> musicClips;
+    const auto& clips = engine_.musicClips();
+    musicClips.ensureStorageAllocated(static_cast<int>(clips.size()));
+    for (const auto& clip : clips) {
+        auto clipObj = std::make_unique<juce::DynamicObject>();
+        clipObj->setProperty("sourcePath", clip.sourcePath);
+        clipObj->setProperty("name", clip.name);
+        addNumber(*clipObj, "startSeconds", clip.startSeconds);
+        addNumber(*clipObj, "sourceOffsetSeconds", clip.sourceOffsetSeconds);
+        addNumber(*clipObj, "lengthSeconds", clip.durationSeconds());
+        addNumber(*clipObj, "gainDb", clip.gainDb);
+        addNumber(*clipObj, "fadeInSeconds", clip.fadeInSeconds);
+        addNumber(*clipObj, "fadeOutSeconds", clip.fadeOutSeconds);
+        musicClips.add(juce::var(clipObj.release()));
+    }
+    root->setProperty("musicClips", musicClips);
+    root->setProperty("selectedMusicClip", musicClipBox_.getSelectedId() - 1);
+
+    return juce::var(root.release());
+}
+
+bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave) {
+    (void) fromAutosave;
+    auto* root = state.getDynamicObject();
+    if (root == nullptr || static_cast<int>(root->getProperty("schemaVersion")) != 1)
+        return false;
+
+    auto* controls = root->getProperty("controls").getDynamicObject();
+    auto* view = root->getProperty("view").getDynamicObject();
+
+    player_.stop();
+    player_.clearSources();
+    engine_.clear();
+    musicUndoStack_.clear();
+    musicClipBox_.clear(juce::dontSendNotification);
+    spectrumView_.setSpectrum({});
+    spectrumView_.setProcessedSpectrum({});
+    updateMusicTimeline();
+    playButton_.setEnabled(false);
+    listenButton_.setEnabled(false);
+    exportButton_.setEnabled(false);
+    noiseReductionSlider_.setEnabled(false);
+
+    restoringProject_ = true;
+    setSliderIfPresent(toneSlider_, controls, "tone");
+    setSliderIfPresent(noiseReductionSlider_, controls, "noiseReduction");
+    setSliderIfPresent(strengthSlider_, controls, "intensity");
+    setSliderIfPresent(fastThresholdSlider_, controls, "fastThreshold");
+    setSliderIfPresent(fastRatioSlider_, controls, "fastRatio");
+    setSliderIfPresent(glueThresholdSlider_, controls, "glueThreshold");
+    setSliderIfPresent(glueRatioSlider_, controls, "glueRatio");
+    setSliderIfPresent(targetPreChainSlider_, controls, "targetPreChain");
+    setSliderIfPresent(deEssFreqSlider_, controls, "deEssFreq");
+    setSliderIfPresent(deEssThresholdSlider_, controls, "deEssThreshold");
+    setSliderIfPresent(deEssPresenceSlider_, controls, "deEssPresence");
+    setSliderIfPresent(deEssRatioSlider_, controls, "deEssRatio");
+    setSliderIfPresent(deEssRangeSlider_, controls, "deEssRange");
+    setSliderIfPresent(musicMasterVolumeSlider_, controls, "musicMasterGain");
+    engine_.setMusicMasterGainDb(musicMasterVolumeSlider_.getValue());
+    player_.setMusicMasterGainDb(musicMasterVolumeSlider_.getValue());
+    setSliderIfPresent(duckLookAheadSlider_, controls, "duckLookAhead");
+    setSliderIfPresent(duckReductionSlider_, controls, "duckReduction");
+    setSliderIfPresent(duckFilterSlider_, controls, "duckBlend");
+    player_.setDuckLookAheadMs(duckLookAheadSlider_.getValue());
+    player_.setDuckReductionDb(duckReductionSlider_.getValue());
+    player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0);
+
+    pendingMusicClipRestore_.clear();
+    pendingSelectedMusicClipRestore_ = static_cast<int>(numberProperty(root, "selectedMusicClip", -1.0));
+    const auto musicClipState = root->getProperty("musicClips");
+    if (musicClipState.isArray()) {
+        for (const auto& item : *musicClipState.getArray()) {
+            auto* clipObj = item.getDynamicObject();
+            const auto clipPath = stringProperty(clipObj, "sourcePath");
+            if (clipPath.isEmpty())
+                continue;
+
+            PendingMusicClipRestore clip;
+            clip.file = juce::File(clipPath);
+            clip.startSeconds = numberProperty(clipObj, "startSeconds", clip.startSeconds);
+            clip.sourceOffsetSeconds = numberProperty(clipObj, "sourceOffsetSeconds", clip.sourceOffsetSeconds);
+            clip.lengthSeconds = numberProperty(clipObj, "lengthSeconds", clip.lengthSeconds);
+            clip.gainDb = numberProperty(clipObj, "gainDb", clip.gainDb);
+            clip.fadeInSeconds = numberProperty(clipObj, "fadeInSeconds", clip.fadeInSeconds);
+            clip.fadeOutSeconds = numberProperty(clipObj, "fadeOutSeconds", clip.fadeOutSeconds);
+            pendingMusicClipRestore_.push_back(std::move(clip));
+        }
+    }
+
+    setSettingsPanelVisible(static_cast<bool>(numberProperty(view, "settingsPanelVisible",
+                                                            settingsPanelVisible_ ? 1.0 : 0.0)));
+    setProPanelVisible(static_cast<bool>(numberProperty(view, "proPanelVisible",
+                                                       proPanelVisible_ ? 1.0 : 0.0)));
+    const auto sourcePath = stringProperty(root, "sourcePath");
+    if (sourcePath.isNotEmpty()) {
+        const juce::File source(sourcePath);
+        if (source.existsAsFile()) {
+            loadFile(source);
+        } else {
+            setUiBusy(false, "Project source is missing: " + sourcePath);
+            restoringProject_ = false;
+            pendingMusicClipRestore_.clear();
+            pendingSelectedMusicClipRestore_ = -1;
+        }
+    } else {
+        restoringProject_ = false;
+        pendingMusicClipRestore_.clear();
+        pendingSelectedMusicClipRestore_ = -1;
+        setUiBusy(false, "Project opened.");
+    }
+
+    const auto projectPath = stringProperty(root, "projectPath");
+    if (projectPath.isNotEmpty())
+        currentProjectFile_ = juce::File(projectPath);
+
+    projectDirty_ = false;
+    autosaveCountdown_ = 0;
+    updateMainMenu();
+    return true;
+}
+
+bool MainComponent::hasProjectContent() const {
+    return engine_.hasAudio() || !engine_.musicClips().empty();
+}
+
+bool MainComponent::maybeSaveBeforeReplacingSession() {
+    // Prompt whenever there is real work that isn't safely stored in a named
+    // project file: either it changed since the last save (dirty), or it has
+    // never been saved to a .vcproj at all (only sitting in the autosave).
+    const bool unsaved = projectDirty_ || currentProjectFile_ == juce::File();
+    if (!unsaved || !hasProjectContent())
+        return true;
+    const int result = juce::AlertWindow::showYesNoCancelBox(
+        juce::AlertWindow::QuestionIcon,
+        "Save current project?",
+        "Do you want to save the current session before starting a new one?",
+        "Save", "Don't Save", "Cancel", this, nullptr);
+    if (result == 0)
+        return false;
+    if (result == 1) {
+        if (currentProjectFile_ == juce::File()) {
+            saveAsNewProject();
+            return false;
+        }
+        saveAutosaveSession();
+        projectDirty_ = false;
+        return true;
+    }
+    return true;
+}
+
+void MainComponent::clearProject() {
+    player_.stop();
+    player_.clearSources();
+    engine_.clear();
+    pendingMusicClipRestore_.clear();
+    pendingSelectedMusicClipRestore_ = -1;
+    currentProjectFile_ = juce::File();
+    projectDirty_ = false;
+    autosaveCountdown_ = 0;
+    intensityMinLoudnessRef_ = 0.0;
+    intensityMaxLoudnessRef_ = 0.0;
+    spectrumView_.setSpectrum({});
+    spectrumView_.setProcessedSpectrum({});
+    musicUndoStack_.clear();
+    musicClipBox_.clear(juce::dontSendNotification);
+    updateMusicTimeline();
+    resetProDefaults();
+    toneSlider_.setValue(0.0, juce::dontSendNotification);
+    noiseReductionSlider_.setValue(75.0, juce::dontSendNotification);
+    strengthSlider_.setValue(100.0, juce::dontSendNotification);
+    playButton_.setEnabled(false);
+    listenButton_.setEnabled(false);
+    exportButton_.setEnabled(false);
+    noiseReductionSlider_.setEnabled(false);
+    dropArea_.setStatus("Add voice audio or video\nDrag here, or click to browse");
+    setUiBusy(false, "New project.");
+    saveAutosaveSession();
+    updateMainMenu();
+}
+
+void MainComponent::newProject() {
+    if (!maybeSaveBeforeReplacingSession())
+        return;
+    promptForProjectName("New Project", "Untitled", [this](juce::String name) {
+        clearProject();
+        currentProjectFile_ = uniqueProjectFile(projectsFolder(), name);
+        saveAutosaveSession(); // writes the new (empty) project file
+        updateMainMenu();
+        statusLabel_.setText("Created project: " + currentProjectFile_.getFileNameWithoutExtension(),
+                             juce::dontSendNotification);
+    });
+}
+
+void MainComponent::promptForProjectName(const juce::String& title, const juce::String& defaultName,
+                                         std::function<void(juce::String)> onName) {
+    auto aw = std::make_shared<juce::AlertWindow>(title, "Project name:",
+                                                  juce::AlertWindow::NoIcon, this);
+    aw->addTextEditor("name", defaultName);
+    aw->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    aw->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    aw->enterModalState(true,
+        juce::ModalCallbackFunction::create([aw, cb = std::move(onName)](int result) {
+            const auto entered = aw->getTextEditorContents("name").trim();
+            aw->exitModalState(result);
+            aw->setVisible(false);
+            if (result == 1 && cb)
+                cb(entered.isNotEmpty() ? entered : "Untitled");
+        }), false);
+}
+
+void MainComponent::openProjectManager() {
+    auto content = std::make_unique<ProjectManagerComponent>(projectsFolder(), currentProjectFile_);
+    auto* pm = content.get();
+    pm->onNew = [this] { closeProjectManager(); newProject(); };
+    pm->onOpen = [this](juce::File f) { closeProjectManager(); openProjectFile(f); };
+    pm->onDelete = [this, pm](juce::File f) {
+        deleteProjectFile(f);
+        pm->setCurrent(currentProjectFile_);
+    };
+    pm->onClose = [this] { closeProjectManager(); };
+
+    juce::DialogWindow::LaunchOptions o;
+    o.content.setOwned(content.release());
+    o.dialogTitle = "Projects";
+    o.dialogBackgroundColour = juce::Colour(0xff20232a);
+    o.escapeKeyTriggersCloseButton = true;
+    o.useNativeTitleBar = true;
+    o.resizable = false;
+    projectManagerWindow_.reset(o.create());
+    projectManagerWindow_->centreWithSize(440, 360);
+    projectManagerWindow_->setVisible(true);
+}
+
+void MainComponent::closeProjectManager() {
+    // Defer destruction: callbacks fire from inside the dialog's own components.
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
+        if (safe != nullptr)
+            safe->projectManagerWindow_.reset();
+    });
+}
+
+void MainComponent::openProjectFile(const juce::File& file) {
+    if (!file.existsAsFile())
+        return;
+    if (!maybeSaveBeforeReplacingSession())
+        return;
+    juce::var parsed;
+    juce::JSON::parse(file.loadFileAsString(), parsed);
+    currentProjectFile_ = file;
+    if (!applyProjectState(parsed, false))
+        statusLabel_.setText("Could not open project.", juce::dontSendNotification);
+}
+
+void MainComponent::deleteProjectFile(const juce::File& file) {
+    const bool wasCurrent = (file == currentProjectFile_);
+    file.deleteFile();
+    if (wasCurrent)
+        clearProject();
+    statusLabel_.setText("Deleted project: " + file.getFileNameWithoutExtension(),
+                         juce::dontSendNotification);
+}
+
+void MainComponent::saveCurrentProject() {
+    if (currentProjectFile_ == juce::File()) {
+        saveAsNewProject();
+        return;
+    }
+    saveAutosaveSession();
+    projectDirty_ = false;
+    autosaveCountdown_ = 0;
+    statusLabel_.setText("Saved: " + currentProjectFile_.getFileNameWithoutExtension(),
+                         juce::dontSendNotification);
+}
+
+void MainComponent::saveAsNewProject() {
+    // Save the current editor content (not cleared) into a freshly named project.
+    promptForProjectName("Save Project", "Untitled", [this](juce::String name) {
+        currentProjectFile_ = uniqueProjectFile(projectsFolder(), name);
+        saveAutosaveSession();
+        projectDirty_ = false;
+        autosaveCountdown_ = 0;
+        updateMainMenu();
+        statusLabel_.setText("Saved: " + currentProjectFile_.getFileNameWithoutExtension(),
+                             juce::dontSendNotification);
+    });
+}
+
+void MainComponent::markProjectDirty() {
+    if (restoringProject_)
+        return;
+    projectDirty_ = true;
+    autosaveCountdown_ = 15;
+}
+
+void MainComponent::saveAutosaveSession() {
+    const auto state = juce::JSON::toString(makeProjectState());
+    // Crash/relaunch restore of the latest editor state (named or not)...
+    autosaveProjectFile().replaceWithText(state);
+    // ...and continuously persist named projects to their own file so the user
+    // never has to think about saving.
+    if (currentProjectFile_ != juce::File())
+        currentProjectFile_.replaceWithText(state);
+}
+
+void MainComponent::restoreAutosaveSession() {
+    const auto file = autosaveProjectFile();
+    if (!file.existsAsFile())
+        return;
+    juce::var parsed;
+    juce::JSON::parse(file.loadFileAsString(), parsed);
+    applyProjectState(parsed, true);
+}
+
 void MainComponent::updateEqView() {
     const auto p = buildParams();
+    if (engine_.hasAudio())
+        spectrumView_.setSpectrum(engine_.previewSpectrum(p.noiseReductionAmount));
     spectrumView_.setEq(vc::fullEqBands(p), p.highpassHz, engine_.sampleRate());
 }
 
@@ -881,45 +1324,18 @@ void MainComponent::applyParamsLive() {
         player_.setInputLoudness(loudnessRef);
     player_.setNoiseReductionAmount(params.noiseReductionAmount);
     player_.setParams(params);             // instant: sound changes now
-    requestProcessedSpectrumUpdate();
+    updateEqView();
+    markProjectDirty();
 }
 
 void MainComponent::requestProcessedSpectrumUpdate() {
     if (!engine_.hasAudio())
         return;
+    spectrumView_.invalidateProcessedSpectrumPreview();
     processedSpectrumRequest_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void MainComponent::startProcessedSpectrumUpdateIfNeeded() {
-    if (!engine_.hasAudio() || busy_.load() || player_.isPlaying())
-        return;
-    if (spectrumWorkerRunning_.load(std::memory_order_relaxed))
-        return;
-
-    const int request = processedSpectrumRequest_.load(std::memory_order_relaxed);
-    if (request == processedSpectrumRendered_.load(std::memory_order_relaxed))
-        return;
-
-    if (spectrumWorker_.joinable())
-        spectrumWorker_.join();
-
-    const auto params = buildParams();
-    spectrumWorkerRunning_.store(true, std::memory_order_relaxed);
-    juce::Component::SafePointer<MainComponent> safe(this);
-    spectrumWorker_ = std::thread([safe, params, request]() {
-        if (safe == nullptr)
-            return;
-        auto resultSpectrum = safe->engine_.analyzeProcessedVoiceSpectrum(params);
-        juce::MessageManager::callAsync([safe, readySpectrum = std::move(resultSpectrum), request]() mutable {
-            if (safe == nullptr)
-                return;
-            if (request == safe->processedSpectrumRequest_.load(std::memory_order_relaxed)) {
-                safe->spectrumView_.setProcessedSpectrum(readySpectrum);
-                safe->processedSpectrumRendered_.store(request, std::memory_order_relaxed);
-            }
-            safe->spectrumWorkerRunning_.store(false, std::memory_order_relaxed);
-        });
-    });
 }
 
 void MainComponent::runOnWorker(const juce::String& busyMsg,
@@ -948,6 +1364,57 @@ void MainComponent::runOnWorker(const juce::String& busyMsg,
     });
 }
 
+void MainComponent::restorePendingMusicClipsAfterVoiceLoad(const juce::File& voiceFile,
+                                                           const juce::String& loadedMessage) {
+    if (pendingMusicClipRestore_.empty()) {
+        restoringProject_ = false;
+        projectDirty_ = false;
+        saveAutosaveSession();
+        setUiBusy(false, loadedMessage);
+        return;
+    }
+
+    auto clipsToRestore = pendingMusicClipRestore_;
+    const int selectedClip = pendingSelectedMusicClipRestore_;
+    pendingMusicClipRestore_.clear();
+    pendingSelectedMusicClipRestore_ = -1;
+
+    runOnWorker(
+        "Restoring backing music...",
+        [this, clipsToRestore]() -> juce::String {
+            for (const auto& saved : clipsToRestore) {
+                if (!saved.file.existsAsFile())
+                    continue;
+
+                juce::String err;
+                if (!engine_.addMusicClip(saved.file, err))
+                    continue;
+
+                const int index = static_cast<int>(engine_.musicClips().size()) - 1;
+                engine_.setMusicClipParams(index, saved.startSeconds, saved.sourceOffsetSeconds,
+                                           saved.gainDb, saved.fadeInSeconds, saved.fadeOutSeconds,
+                                           saved.lengthSeconds);
+            }
+
+            return {};
+        },
+        [this, voiceFile, loadedMessage, selectedClip]() {
+            player_.setMusicMasterGainDb(engine_.musicMasterGainDb());
+            refreshMusicClipList();
+            const int count = static_cast<int>(engine_.musicClips().size());
+            if (count > 0)
+                musicClipBox_.setSelectedId(juce::jlimit(1, count, selectedClip + 1),
+                                            juce::sendNotification);
+            updateMusicTimeline();
+
+            restoringProject_ = false;
+            projectDirty_ = false;
+            saveAutosaveSession();
+            setUiBusy(false, loadedMessage + " Backing music restored.");
+            dropArea_.setStatus(voiceFile.getFileName());
+        });
+}
+
 void MainComponent::loadFile(const juce::File& file) {
     player_.stop();
     if (spectrumWorker_.joinable())
@@ -956,6 +1423,11 @@ void MainComponent::loadFile(const juce::File& file) {
     processedSpectrumRequest_.store(0, std::memory_order_relaxed);
     processedSpectrumRendered_.store(0, std::memory_order_relaxed);
     spectrumView_.setProcessedSpectrum({});
+    engine_.setMusicClips({});
+    player_.setMusicClips({});
+    musicUndoStack_.clear();
+    musicClipBox_.clear(juce::dontSendNotification);
+    updateMusicTimeline();
     analyzingMedia_ = true;
     dropArea_.setStatus("Analyzing " + file.getFileName() + "\nMeasuring level and voice profile");
     const auto params = buildParams();
@@ -972,8 +1444,7 @@ void MainComponent::loadFile(const juce::File& file) {
                 vc::applyIntensity(measuredParams, intensity);
                 measuredParams.inputCalibrationGainDb =
                     vc::computeCalibrationGainDb(engine_.inputLufs(), measuredParams);
-                measuredParams.autoEqBands =
-                    vc::computeAutoEqBands(engine_.spectrum(), measuredParams.baseAutoEqStrength);
+                measuredParams.autoEqBands = engine_.autoEqBands(measuredParams.baseAutoEqStrength);
                 return measuredParams;
             };
 
@@ -1002,9 +1473,17 @@ void MainComponent::loadFile(const juce::File& file) {
 
             const double target = buildParams().targetLufs;
             analyzingMedia_ = false;
-            setUiBusy(false, juce::String::formatted(
+            const auto loadedMessage = juce::String::formatted(
                 "Loaded \"%s\"  -  denoising in background, input %.1f LUFS, target %.0f LUFS.",
-                file.getFileName().toRawUTF8(), engine_.inputLufs(), target));
+                file.getFileName().toRawUTF8(), engine_.inputLufs(), target);
+            if (restoringProject_) {
+                restorePendingMusicClipsAfterVoiceLoad(file, loadedMessage);
+                return;
+            } else {
+                markProjectDirty();
+            }
+            saveAutosaveSession();
+            setUiBusy(false, loadedMessage);
         });
 }
 
@@ -1051,6 +1530,7 @@ void MainComponent::addMusicClip(double startSeconds) {
                     if (index >= 0)
                         musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
                     setUiBusy(false, "Backing music added.");
+                    markProjectDirty();
                 });
         });
 }
@@ -1062,37 +1542,39 @@ void MainComponent::removeSelectedMusicClip() {
     engine_.removeMusicClip(index);
     refreshMusicClipList();
     updateMusicTimeline();
+    markProjectDirty();
 }
 
 void MainComponent::doExport() {
     if (!engine_.hasAudio()) return;
 
-    auto src = engine_.sourceFile();
-    const bool hasVideo = engine_.sourceHasVideo();
-    const juce::String outExt = hasVideo ? ".mp4" : ".wav";
-    const juce::String filter = hasVideo ? "*.mp4" : "*.wav;*.mp3;*.m4a;*.flac;*.aiff";
-    auto suggested = src.getParentDirectory()
-                         .getChildFile(src.getFileNameWithoutExtension() + "_enhanced" + outExt);
+    auto* content = new ExportComponent(engine_.sourceFile(), engine_.sourceHasVideo());
+    content->onExport = [this](juce::File out, bool muxVideo) { performExport(out, muxVideo); };
 
-    exportChooser_ = std::make_unique<juce::FileChooser>(
-        hasVideo ? "Export enhanced video" : "Export enhanced audio", suggested, filter);
-    exportChooser_->launchAsync(
-        juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
-        [this](const juce::FileChooser& fc) {
-            auto out = fc.getResult();
-            if (out == juce::File()) return;
+    juce::DialogWindow::LaunchOptions options;
+    options.content.setOwned(content);
+    options.dialogTitle = "Export";
+    options.componentToCentreAround = this;
+    options.dialogBackgroundColour = juce::Colour(0xff2b2f36);
+    options.escapeKeyTriggersCloseButton = true;
+    options.useNativeTitleBar = true;
+    options.resizable = false;
+    options.launchAsync();
+}
 
-            const auto params = buildParams();
-            runOnWorker(
-                "Exporting (exact offline render)...",
-                [this, out, params]() -> juce::String {
-                    juce::String err;
-                    if (!engine_.exportTo(out, params, err))
-                        return err.isEmpty() ? "export failed" : err;
-                    return {};
-                },
-                [this, out]() { setUiBusy(false, "Exported: " + out.getFullPathName()); });
-        });
+void MainComponent::performExport(juce::File out, bool muxVideo) {
+    if (out == juce::File()) return;
+
+    const auto params = buildParams();
+    runOnWorker(
+        "Exporting (exact offline render)...",
+        [this, out, params, muxVideo]() -> juce::String {
+            juce::String err;
+            if (!engine_.exportTo(out, params, muxVideo, err))
+                return err.isEmpty() ? "export failed" : err;
+            return {};
+        },
+        [this, out]() { setUiBusy(false, "Exported: " + out.getFullPathName()); });
 }
 
 void MainComponent::togglePlay() {
@@ -1111,6 +1593,20 @@ bool MainComponent::keyPressed(const juce::KeyPress& key) {
         && (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z')) {
         undoMusicTimelineEdit();
         return true;
+    }
+    if (mods.isCtrlDown() || mods.isCommandDown()) {
+        if (key.getKeyCode() == 'n' || key.getKeyCode() == 'N') {
+            newProject();
+            return true;
+        }
+        if (key.getKeyCode() == 'o' || key.getKeyCode() == 'O') {
+            openProjectManager();
+            return true;
+        }
+        if (key.getKeyCode() == 's' || key.getKeyCode() == 'S') {
+            saveCurrentProject();
+            return true;
+        }
     }
 
     if (key == juce::KeyPress::spaceKey && playButton_.isEnabled()) {
@@ -1159,12 +1655,22 @@ void MainComponent::timerCallback() {
     playButton_.setColour(juce::TextButton::buttonOnColourId, playCol);
 
     // Meters reflect the live chain while playing; ease back to 0 when stopped.
-    fastCompMeter_.setReduction(playing ? player_.fastCompReductionDb() : 0.0f);
-    glueCompMeter_.setReduction(playing ? player_.glueCompReductionDb() : 0.0f);
+    compMeter_.setReductions(playing ? player_.glueCompReductionDb() : 0.0f,
+                             playing ? player_.fastCompReductionDb() : 0.0f);
     deEssMeter_.setReduction(playing ? player_.deEssReductionDb() : 0.0f);
     limiterMeter_.setReduction(playing ? player_.limiterReductionDb() : 0.0f);
     vuMeter_.setLevels(playing ? player_.rmsLevelDb() : -60.0f,
                        playing ? player_.peakLevelDb() : -60.0f);
+
+    // Music-output / duck display.
+    std::array<float, 512> musicWave;
+    if (playing)
+        player_.readMusicAnalysisBlock(musicWave.data(), static_cast<int>(musicWave.size()));
+    else
+        musicWave.fill(0.0f);
+    duckView_.setMusicWaveform(musicWave.data(), static_cast<int>(musicWave.size()));
+    duckView_.setDuckState(playing ? player_.musicDuckReductionDb() : 0.0f,
+                           static_cast<float>(duckFilterSlider_.getValue() / 100.0));
 
     // Animate the spectrum to the playing audio; revert to the average when idle.
     if (playing)
@@ -1175,6 +1681,8 @@ void MainComponent::timerCallback() {
     if (engine_.processMusicWaveformChunks(256))
         updateMusicTimeline();
 
+    spectrumView_.tickAnimation();
+    musicTimeline_.tickAnimation();
     startProcessedSpectrumUpdateIfNeeded();
 
     const double playheadSeconds = engine_.sampleRate() > 0.0
@@ -1186,6 +1694,23 @@ void MainComponent::timerCallback() {
     // Steer the background denoiser toward what's playing.
     if (engine_.hasAudio())
         engine_.setPlayheadFrame(player_.currentSourceFrame());
+
+    if (autosaveCountdown_ > 0 && --autosaveCountdown_ == 0)
+        saveAutosaveSession();
+
+    if (engine_.hasAudio() && !busy_.load(std::memory_order_relaxed)
+        && engine_.refreshVoiceProfileFromDenoised()) {
+        spectrumView_.setSpectrum(engine_.spectrum());
+        updateEqView();
+        updateMusicTimeline();
+        applyParamsLive();
+        statusLabel_.setText("Voice balance updated from denoised vocal profile.",
+                             juce::dontSendNotification);
+    } else if (engine_.hasAudio() && !busy_.load(std::memory_order_relaxed)
+               && !engine_.voiceProfileUsesDenoised()) {
+        statusLabel_.setText("Preparing voice profile in background...",
+                             juce::dontSendNotification);
+    }
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -1208,15 +1733,13 @@ void MainComponent::resized() {
     }
 
     // Live gain-reduction meters.
-    fastCompMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    glueCompMeter_.setBounds(r.removeFromTop(20));
+    compMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(2);
     deEssMeter_.setBounds(r.removeFromTop(20));
     r.removeFromTop(2);
     limiterMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(12);
-    vuMeter_.setBounds(r.removeFromTop(30));
+    r.removeFromTop(2);
+    vuMeter_.setBounds(r.removeFromTop(24));
     r.removeFromTop(10);
 
     auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider) {
@@ -1257,15 +1780,15 @@ void MainComponent::resized() {
     placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
     r.removeFromTop(8);
 
-    spectrumView_.setBounds(r.removeFromTop(112));
+    spectrumView_.setBounds(r.removeFromTop(128));
     r.removeFromTop(6);
 
-    auto timelineBounds = r.removeFromTop(200);
+    auto timelineBounds = r.removeFromTop(216);
     musicTimeline_.setBounds(timelineBounds);
     // The voice drop field covers only the voice lane (top), leaving the music
     // lane below clickable so its own "+" adds a music clip. Matches
-    // MusicTimeline's internal lane layout: reduced(10), 88px voice lane.
-    auto voiceLane = timelineBounds.reduced(10).removeFromTop(88);
+    // MusicTimeline's internal lane layout: reduced(10), 96px voice lane.
+    auto voiceLane = timelineBounds.reduced(10).removeFromTop(96);
     dropArea_.setBounds(voiceLane);
     dropArea_.setVisible(analyzingMedia_ || !engine_.hasAudio());
     dropArea_.toFront(false);
@@ -1294,6 +1817,8 @@ void MainComponent::resized() {
                  duckReductionLabel_, duckReductionSlider_);
     placeEncoder(duckArea.reduced(4, 0),
                  duckFilterLabel_, duckFilterSlider_);
+    // The leftover middle band holds the music-output / duck display.
+    duckView_.setBounds(musicRow.reduced(8, 4));
     r.removeFromTop(8);
 
     if (proPanelVisible_) {

@@ -50,6 +50,68 @@ private:
     float displayed_ = 0.0f;
 };
 
+// Combined compression meter: two gain-reduction layers share one bar, like the
+// VuMeter. Glue compression draws as the back layer and peak (fast) compression
+// on top, so both read at a glance; the numeric readout shows the combined dB.
+class CompMeter : public juce::Component {
+public:
+    CompMeter(juce::String label, float maxDb,
+              juce::Colour glueColour, juce::Colour peakColour)
+        : label_(std::move(label)), maxDb_(maxDb),
+          glueColour_(glueColour), peakColour_(peakColour) {}
+
+    // Target reductions in positive dB (0 = no reduction). Eased on each call.
+    void setReductions(float glueDb, float peakDb) {
+        const float glueTarget = juce::jlimit(0.0f, maxDb_, glueDb);
+        glueDisplayed_ += (glueTarget - glueDisplayed_) * (glueTarget > glueDisplayed_ ? 0.6f : 0.25f);
+        const float peakTarget = juce::jlimit(0.0f, maxDb_, peakDb);
+        peakDisplayed_ += (peakTarget - peakDisplayed_) * (peakTarget > peakDisplayed_ ? 0.6f : 0.25f);
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override {
+        auto r = getLocalBounds();
+        auto labelArea = r.removeFromLeft(58);
+
+        g.setColour(juce::Colours::white.withAlpha(0.75f));
+        g.setFont(juce::Font(juce::FontOptions(12.0f)));
+        g.drawText(label_, labelArea, juce::Justification::centredLeft);
+
+        auto track = r.reduced(0, 3).toFloat();
+        g.setColour(juce::Colour(0xff14161b));
+        g.fillRoundedRectangle(track, 3.0f);
+
+        // Stack the two reductions end to end: glue (stronger colour) grows from
+        // the left, then peak (fast) compression continues on top of it in a
+        // lighter colour. Combined length matches the summed dB readout.
+        const float invMax = maxDb_ > 0.0f ? (1.0f / maxDb_) : 0.0f;
+        const float trackW = track.getWidth();
+        const float glueW = juce::jlimit(0.0f, trackW, glueDisplayed_ * invMax * trackW);
+        const float peakW = juce::jlimit(0.0f, trackW - glueW, peakDisplayed_ * invMax * trackW);
+
+        if (glueW > 1.0f) {
+            g.setColour(glueColour_.withAlpha(0.92f));
+            g.fillRoundedRectangle(track.withWidth(glueW), 3.0f);
+        }
+        if (peakW > 1.0f) {
+            g.setColour(peakColour_.withAlpha(0.55f));
+            g.fillRoundedRectangle(track.withX(track.getX() + glueW).withWidth(peakW), 3.0f);
+        }
+
+        g.setColour(juce::Colours::white.withAlpha(0.85f));
+        g.setFont(juce::Font(juce::FontOptions(11.0f)));
+        g.drawText(juce::String(glueDisplayed_ + peakDisplayed_, 1) + " dB", r,
+                   juce::Justification::centredRight);
+    }
+
+private:
+    juce::String label_;
+    float maxDb_ = 12.0f;
+    juce::Colour glueColour_, peakColour_;
+    float glueDisplayed_ = 0.0f;
+    float peakDisplayed_ = 0.0f;
+};
+
 // Horizontal level meter. Two layers share one bar: a lighter-green peak layer
 // behind and a deep-green RMS (average) layer in front, so you can read both
 // average and peak at a glance. The numeric readout holds the highest peak for
@@ -70,17 +132,6 @@ public:
 
         const float peakTarget = juce::jlimit(minDb_, maxDb_, peakDb);
         peakDb_ += (peakTarget - peakDb_) * (peakTarget > peakDb_ ? 0.9f : 0.5f);
-
-        // Hold the highest peak for a moment, then let it ease back down so the
-        // readout doesn't snap away from a transient before you can see it.
-        if (peakDb_ >= holdDb_) {
-            holdDb_ = peakDb_;
-            holdFrames_ = 26; // ~kUiHz frames of hold before release begins
-        } else if (holdFrames_ > 0) {
-            --holdFrames_;
-        } else {
-            holdDb_ += (peakDb_ - holdDb_) * 0.08f;
-        }
 
         repaint();
     }
@@ -108,13 +159,15 @@ public:
         }
         // RMS layer (active encoder green), in front.
         if (rmsFrac * track.getWidth() > 1.0f) {
-            g.setColour(kGreen.withAlpha(0.95f));
+            g.setColour(kGreen.withAlpha(0.68f));
             g.fillRoundedRectangle(track.withWidth(track.getWidth() * rmsFrac), 3.0f);
         }
 
+        // Numeric readout shows the RMS average (the deep-green front layer), not
+        // the peak — peaks naturally sit a few dB above and read deceptively hot.
         g.setColour(juce::Colours::white.withAlpha(0.85f));
         g.setFont(juce::Font(juce::FontOptions(11.0f)));
-        g.drawText(juce::String(holdDb_, 1) + " dB", r,
+        g.drawText(juce::String(rmsDb_, 1) + " dB", r,
                    juce::Justification::centredRight);
     }
 
@@ -127,6 +180,4 @@ private:
     float maxDb_ = 0.0f;
     float rmsDb_ = -60.0f;
     float peakDb_ = -60.0f;
-    float holdDb_ = -60.0f;
-    int holdFrames_ = 0;
 };
