@@ -37,6 +37,7 @@ public:
     void setMusicClipParams(int index, double startSeconds, double sourceOffsetSeconds, double gainDb,
                             double fadeInSeconds, double fadeOutSeconds,
                             double lengthSeconds = 0.0);
+    void setMusicClipWaveformPeaks(int index, std::vector<float> peaks, int processedColumns);
     bool processMusicWaveformChunks(int maxColumns);
     void removeMusicClip(int index);
     void setMusicClips(std::vector<MusicClip> clips);
@@ -60,6 +61,10 @@ public:
     const juce::AudioBuffer<float>& afterBuffer() const { return afterJuce_; }
     const std::vector<float>& voiceWaveformPeaks() const { return voiceWaveformPeaks_; }
     const std::vector<float>& processedVoiceWaveformPeaks() const { return processedVoiceWaveformPeaks_; }
+    // Linear gain that maps the raw stored peaks to the loudness-normalized
+    // (heard) level, so the displayed waveform matches playback rather than the
+    // raw input amplitude. 1.0 when loudness hasn't been measured yet.
+    float waveformDisplayGain() const;
     double sampleRate() const { return static_cast<double>(original_.sampleRate); }
 
     // Progressive denoise output for the live preview blend. The planar buffer
@@ -95,6 +100,9 @@ public:
 
     double lastInputLufs() const { return lastInputLufs_; }
     double lastGainDb() const { return lastGainDb_; }
+    juce::var makeAnalysisCacheState() const;
+    void setProjectAnalysisCache(const juce::var& state);
+    void saveAnalysisCacheNow() const { saveAnalysisCache(); }
 
 private:
     static juce::AudioBuffer<float> toJuce(const vc::AudioBuffer& src);
@@ -104,6 +112,7 @@ private:
                                                double amount);
     static void mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips, double masterGainDb);
     bool loadAnalysisCache(const juce::File& media);
+    bool applyAnalysisCacheState(const juce::var& state, const juce::File& media);
     void saveAnalysisCache() const;
 
     vc::AudioBuffer original_;
@@ -126,4 +135,5 @@ private:
     double inputPeakDb_ = -120.0;
     double lastInputLufs_ = 0.0;
     double lastGainDb_ = 0.0;
+    juce::var pendingProjectAnalysisCache_;
 };

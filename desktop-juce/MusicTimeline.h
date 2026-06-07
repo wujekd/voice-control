@@ -19,7 +19,12 @@ public:
 
     void setVoice(const juce::AudioBuffer<float>* voice, double sampleRate);
     void setVoiceWaveformPeaks(const std::vector<float>* dryPeaks,
-                               const std::vector<float>* processedPeaks);
+                               const std::vector<float>* processedPeaks,
+                               float displayGain = 1.0f);
+    // Current noise-reduction blend (0 = dry, 1 = fully denoised). The displayed
+    // voice waveform blends the dry and denoised peaks by this amount so it
+    // tracks what you hear as the slider moves.
+    void setVoiceNoiseReduction(float amount01);
     void setClips(const std::vector<MusicClip>* clips, int selectedIndex);
     void setPlayheadSeconds(double seconds);
     bool tickAnimation();
@@ -73,4 +78,6 @@ private:
     bool scrubbing_ = false;
     bool hadProcessedVoicePeaks_ = false;
     float voiceWaveformTransition_ = 1.0f;
+    float voiceWaveformGain_ = 1.0f; // maps raw peaks to the normalized (heard) level
+    float voiceNoiseReduction_ = 0.0f; // 0 = dry, 1 = fully denoised
 };

@@ -3,6 +3,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "Ducker.h" // crossover constants
+#include "SpectrumAnalyzer.h" // vc::SpectrumResult
 
 #include <cmath>
 #include <cstdint>
@@ -19,6 +20,22 @@ public:
     void setMusicWaveform(const float* samples, int n) {
         wave_.assign(samples, samples + juce::jmax(0, n));
         repaint();
+    }
+
+    // Live spectrum of the heard backing music, drawn behind the duck line so
+    // the dip lines up with the frequencies it acts on. An invalid result
+    // clears the backdrop (e.g. when stopped).
+    void setMusicSpectrum(const vc::SpectrumResult& spectrum) {
+        spectrum_ = spectrum;
+        repaint();
+    }
+
+    // When false the duck curve is not drawn; the music waveform and layout stay.
+    void setDuckingEnabled(bool enabled) {
+        if (duckingEnabled_ != enabled) {
+            duckingEnabled_ = enabled;
+            repaint();
+        }
     }
 
     // reductionDb: positive dB of current music gain reduction. blend01: the
@@ -44,16 +61,16 @@ public:
         drawWaveform(g, waveLane);
         drawDuckLine(g, lineLane);
 
-        g.setColour(juce::Colours::white.withAlpha(0.45f));
         g.setFont(juce::Font(juce::FontOptions(10.0f)));
+        g.setColour(juce::Colours::white.withAlpha(0.45f));
         g.drawText("Music out", waveLane.toNearestInt(), juce::Justification::topLeft);
-        g.drawText("Duck", lineLane.toNearestInt(), juce::Justification::topLeft);
     }
 
 private:
     static constexpr float kFMin = 20.0f;
     static constexpr float kFMax = 20000.0f;
     static constexpr float kMaxDb = 24.0f; // full-scale of the duck dip
+    static constexpr float kMaxWaveGain = 12.0f; // cap on scope auto-gain
     inline static const juce::Colour kGreen { 0xff6ee07a };
 
     float freqToX(float f, float x0, float w) const {
@@ -75,6 +92,17 @@ private:
         if (n <= 0)
             return;
 
+        // The backing music is usually quiet, so a raw trace barely moves.
+        // Auto-gain to the block peak (capped) so the scope stays lively
+        // without clipping on louder passages; fast fall, slower rise.
+        float peak = 0.0f;
+        for (float v : wave_)
+            peak = juce::jmax(peak, std::abs(v));
+        const float targetGain = peak > 1.0e-4f
+            ? juce::jlimit(1.0f, kMaxWaveGain, 0.9f / peak)
+            : kMaxWaveGain;
+        waveGain_ += (targetGain - waveGain_) * (targetGain < waveGain_ ? 0.3f : 0.1f);
+
         const float half = lane.getHeight() * 0.5f;
         g.setColour(kGreen.withAlpha(0.6f));
         for (int c = 0; c < cols; ++c) {
@@ -86,8 +114,8 @@ private:
                 hi = juce::jmax(hi, wave_[static_cast<std::size_t>(i)]);
             }
             const float x = lane.getX() + static_cast<float>(c);
-            const float yLo = mid - juce::jlimit(-half, half, hi * half);
-            const float yHi = mid - juce::jlimit(-half, half, lo * half);
+            const float yLo = mid - juce::jlimit(-half, half, hi * half * waveGain_);
+            const float yHi = mid - juce::jlimit(-half, half, lo * half * waveGain_);
             g.drawVerticalLine(juce::roundToInt(x), juce::jmin(yLo, yHi), juce::jmax(yLo, yHi) + 1.0f);
         }
     }
@@ -108,6 +136,10 @@ private:
         const float top = lane.getY() + 2.0f;
         const float usable = lane.getHeight() - 4.0f;
 
+        // Spectrum of the heard music behind the duck line, on the same
+        // log-frequency x-axis so the dip lines up with the band it acts on.
+        drawSpectrumBackdrop(g, lane);
+
         // Baseline (music at full level), faint.
         g.setColour(juce::Colours::white.withAlpha(0.12f));
         g.drawHorizontalLine(juce::roundToInt(top), x0, lane.getRight());
@@ -123,11 +155,46 @@ private:
             if (s == 0) line.startNewSubPath(x, y);
             else line.lineTo(x, y);
         }
-        g.setColour(kGreen.withAlpha(0.85f));
-        g.strokePath(line, juce::PathStrokeType(1.6f));
+        if (duckingEnabled_) {
+            g.setColour(kGreen.withAlpha(0.85f));
+            g.strokePath(line, juce::PathStrokeType(1.6f));
+        }
+    }
+
+    void drawSpectrumBackdrop(juce::Graphics& g, juce::Rectangle<float> lane) {
+        if (!spectrum_.valid)
+            return;
+        const float x0 = lane.getX();
+        const float w = lane.getWidth();
+        if (w <= 0.0f)
+            return;
+
+        // Auto-scale to the loudest visible point so quiet music still reads.
+        float maxDb = -120.0f;
+        for (int px = 0; px <= static_cast<int>(w); px += 2)
+            maxDb = juce::jmax(maxDb, spectrum_.dbAt(xToFreq(x0 + static_cast<float>(px), x0, w)));
+        const float topDb = maxDb + 6.0f, botDb = maxDb - 60.0f;
+        const float yTop = lane.getY();
+        const float yBot = lane.getBottom();
+        auto mapDb = [&](float db) { return juce::jmap(db, botDb, topDb, yBot, yTop); };
+
+        juce::Path fill;
+        fill.startNewSubPath(x0, yBot);
+        for (int px = 0; px <= static_cast<int>(w); px += 2) {
+            const float x = x0 + static_cast<float>(px);
+            const float f = xToFreq(x, x0, w);
+            fill.lineTo(x, juce::jlimit(yTop, yBot, mapDb(spectrum_.dbAt(f))));
+        }
+        fill.lineTo(lane.getRight(), yBot);
+        fill.closeSubPath();
+        g.setColour(kGreen.withAlpha(0.14f));
+        g.fillPath(fill);
     }
 
     std::vector<float> wave_;
+    vc::SpectrumResult spectrum_;
+    bool duckingEnabled_ = true;
     float displayedDb_ = 0.0f;
     float blend_ = 0.0f;
+    float waveGain_ = 1.0f;
 };

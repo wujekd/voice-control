@@ -1,272 +1,509 @@
 ---
 title: Audio Processing Architecture
 date_created: 2026-06-06
+last_updated: 2026-06-06
 owner: Voice Control
 tags: audio, dsp, engine, architecture
 ---
 
 # Audio Processing Architecture
 
-This document describes how Voice Control processes audio today: what the engine
-does, the order of the signal chain, and — most importantly — **how processing
-decisions are made** (which EQ moves, how much noise reduction, how loud, etc.).
-It is written as the reference for adding the planned **automatic noise-reduction
-dial-in** feature (see the final section).
+Comprehensive reference for how Voice Control processes audio: the component
+layout, the end-to-end pipeline, every DSP stage, and — the focus — **how
+processing decisions are made** (which EQ moves, how much noise reduction, how
+loud). Diagrams lead; prose explains.
 
-The DSP itself is platform-agnostic and lives in [`core/`](../core) (namespace
-`vc`). The JUCE desktop app in [`desktop-juce/`](../desktop-juce) is glue: it
-owns decoded audio, drives FFmpeg, builds parameters from the UI, and calls into
+The DSP is platform-agnostic and lives in [`core/`](../core) (namespace `vc`).
+The JUCE desktop app in [`desktop-juce/`](../desktop-juce) is glue: it owns
+decoded audio, drives FFmpeg, builds parameters from the UI, and calls into
 `vc_core`. The core never depends on JUCE; the UI never reimplements DSP.
 
 ---
 
-## 1. The two halves: a *blend* and a *fixed chain*
+## 1. System overview
 
-Conceptually every processed result is:
+```mermaid
+flowchart TB
+    subgraph UI["desktop-juce (JUCE UI)"]
+        MC["MainComponent<br/>controls → ChainParams"]
+        PP["PreviewPlayer<br/>real-time audio thread"]
+        SV["SpectrumView / MusicTimeline / DuckView"]
+    end
+    subgraph ENGINE["ProcessingEngine (glue)"]
+        EG["loadMedia / process / exportTo<br/>owns decoded audio + analysis"]
+        DS["DenoiseStreamer<br/>background worker"]
+        CACHE[("Analysis cache<br/>JSON on disk")]
+    end
+    subgraph CORE["vc_core (portable DSP)"]
+        VC["VoiceChain - offline"]
+        LVC["LiveVoiceChain - real-time"]
+        EQ["Eq: auto-EQ decisions"]
+        SA["SpectrumAnalyzer"]
+        DN["Denoiser<br/>DeepFilterNet3 wrapper"]
+        DK["Ducker"]
+    end
+    subgraph EXT["External"]
+        FF["FFmpeg<br/>decode / encode / mux"]
+        DFN["libdeepfilter<br/>neural model"]
+    end
+
+    MC -->|"ChainParams"| EG
+    MC -->|"ChainParams"| PP
+    EG --> VC --> EQ
+    EG --> SA
+    EG --> DS --> DN --> DFN
+    EG <--> CACHE
+    EG -->|"decode/export"| FF
+    PP --> LVC --> EQ
+    PP --> DK
+    PP -.reads denoised buffer.-> DS
+    EG --> SV
+```
+
+Two things to hold onto from the start:
+
+- **There are two chains.** `VoiceChain` is the offline/authoritative renderer
+  (used by `process()` and export). `LiveVoiceChain` is the real-time preview on
+  the audio thread. Same stage order; small deliberate differences (§7).
+- **Noise reduction is not a chain stage.** The denoised signal is produced
+  out-of-band by the neural model, cached, and blended with the dry original
+  *before* either chain runs (§3, §5).
+
+---
+
+## 2. End-to-end pipeline
+
+```mermaid
+flowchart LR
+    SRC["Source file<br/>video or audio"] -->|"FFmpeg decode"| ORIG["original buffer<br/>48 kHz"]
+    ORIG --> ANA["Analyse:<br/>LUFS, peak,<br/>dry spectrum,<br/>waveform peaks"]
+    ORIG --> DENO["Background denoise<br/>DeepFilterNet3"]
+    ANA --> EQ0["auto-EQ from<br/>dry spectrum"]
+    DENO --> PROF["denoised voice<br/>profile"]
+    PROF --> EQ1["noise-aware<br/>auto-EQ"]
+
+    ORIG --> BLEND
+    DENO --> BLEND{{"blend<br/>1-a · dry + a · denoised"}}
+    EQ1 --> CHAIN
+    BLEND --> CHAIN["VoiceChain<br/>8 stages"]
+    CHAIN --> MIX{{"+ backing music"}}
+    MIX --> OUT["after buffer"]
+    OUT -->|"FFmpeg encode/mux"| FILE["exported file"]
+```
+
+The whole result is, conceptually:
 
 ```
 result = VoiceChain( blend(original, denoised, amount) ) + music
 ```
 
-There are two independent decisions baked into this:
-
-1. **How much denoise to mix in** — the `noiseReductionAmount` blend (0 = raw
-   original, 1 = fully denoised). This is the part the new feature will set
-   automatically.
-2. **What the voice chain does** — high-pass, EQ, compression, de-essing,
-   loudness, limiting. Most of this is *fixed* per preset, except the **auto-EQ**
-   curve, which is *derived from the measured spectrum*.
-
-Key architectural point: **noise reduction is not a stage inside `VoiceChain`.**
-The denoised signal is produced separately and out-of-band (neural model, runs
-in the background), cached, and then blended with the dry original *before* the
-chain runs. The chain only ever sees the already-blended signal.
+| Phase | Where | Cost | Notes |
+|---|---|---|---|
+| Decode | `loadMedia` → FFmpeg | slow | always to 48 kHz WAV via temp file |
+| Analyse | `loadMedia` | medium | LUFS, peak, dry spectrum, peaks; cached |
+| Denoise | `DenoiseStreamer` | background | faster-than-real-time, playhead-first |
+| Profile swap | `refreshVoiceProfileFromDenoised` | medium | re-measures spectrum from denoised |
+| Render | `process` / `LiveVoiceChain` | fast | blend → chain → music |
+| Export | `exportTo` | slow | waits for full denoise, then FFmpeg |
 
 ---
 
-## 2. The signal chain (`vc::VoiceChain`)
+## 3. The signal chain (`vc::VoiceChain`)
+
+```mermaid
+flowchart LR
+    IN["blended input"] --> PG["0 · pre-gain<br/>calib + intensity"]
+    PG --> HP["1 · high-pass<br/>rumble"]
+    HP --> EQ["2 · EQ<br/>auto-EQ + tone"]
+    EQ --> FC["3 · fast comp<br/>peak control"]
+    FC --> GC["4 · glue comp<br/>density"]
+    GC --> DE["5 · de-esser<br/>sibilance"]
+    DE --> LN["6 · loudness<br/>→ target LUFS"]
+    LN --> LM["7 · limiter<br/>ceiling"]
+    LM --> OUT["output"]
+
+    classDef adaptive fill:#2d5,stroke:#093,color:#000
+    classDef fixed fill:#ddd,stroke:#999,color:#000
+    class EQ adaptive
+    class PG,HP,FC,GC,DE,LN,LM fixed
+```
 
 Defined in [`core/VoiceChain.cpp`](../core/VoiceChain.cpp). Fixed stage order,
-processed in place on an `AudioBuffer`:
+processed in place. **EQ is the only content-adaptive stage** (green); every
+other stage uses fixed numeric parameters chosen by preset + intensity. Each
+stage reads its own fields from one `ChainParams` struct
+([`core/Presets.h`](../core/Presets.h)) — adding a stage means adding fields, not
+changing the chain interface.
+
+The blend step (`blendNoiseReduction`) runs in
+[`ProcessingEngine.cpp`](../desktop-juce/ProcessingEngine.cpp) *before* the chain;
+music is mixed in *after* (offline) or summed live (preview).
+
+### Stage details
+
+| # | Stage | Class | Key behavior |
+|---|---|---|---|
+| 0 | pre-gain | inline | `inputCalibrationGainDb + intensityDriveDb`, linear |
+| 1 | high-pass | `Biquad` | per channel, `highpassHz` (70–110), Q 0.707 |
+| 2 | EQ | `EqSection` | auto-EQ bands + tone bands (§4) |
+| 3 | fast comp | `Compressor` | ratio 10, ~1.5 ms attack, soft knee — catches peaks |
+| 4 | glue comp | `Compressor` | ratio 2.5, 20 ms attack — density/glue |
+| 5 | de-esser | `DeEsser` | band-split ~6.2 kHz + presence gate |
+| 6 | loudness | `LoudnessNormalizer` | BS.1770 integrated LUFS → target |
+| 7 | limiter | `Limiter` | look-ahead, ceiling −1 dBFS |
+
+**Compressor** ([`Compressor.cpp`](../core/Compressor.cpp)): linked peak detector
+across channels, static soft-knee curve → dB gain reduction, branch on
+attack/release coefficient, smoothed envelope. Two instances in series.
+
+**De-esser** ([`DeEsser.cpp`](../core/DeEsser.cpp)): splits each sample into
+low/high around the crossover; the **high band only** is ducked, and only when
+*both* the high-band level exceeds threshold *and* the high-to-full presence
+ratio exceeds `presenceThresholdDb` — so steady bright tone doesn't trigger it,
+only true sibilance. `excessDb = min(highLevel − T, presence − presenceThresh)`.
+
+**Loudness** ([`LoudnessNormalizer.cpp`](../core/LoudnessNormalizer.cpp)):
+K-weighting + 400 ms blocks / 100 ms hop, absolute gate −70 LUFS, relative gate
+−10 LU, then a single corrective gain `target − measured` (clamped ±30 dB). This
+is a real two-pass measurement in the offline chain.
+
+**Limiter** ([`Limiter.cpp`](../core/Limiter.cpp)): computes desired per-sample
+gain to hold the linked peak under the ceiling, then a forward pass (release rate
+limit) and backward pass (attack rate limit) so gain dips *ahead* of a peak.
+
+---
+
+## 4. The EQ decision engine (the heart of "how decisions are made")
+
+EQ is the one stage driven by measurement. Everything here is in
+[`core/Eq.cpp`](../core/Eq.cpp).
+
+### 4.1 What gets measured
+
+```mermaid
+flowchart TB
+    SPEC["SpectrumResult<br/>Welch avg, 4096-pt FFT"] --> ANCHOR["anchor = bandDb 300–3000 Hz<br/>= speech core"]
+    ANCHOR --> B1["low  = bandDb 60–200  − anchor"]
+    ANCHOR --> B2["mud  = bandDb 200–450 − anchor"]
+    ANCHOR --> B3["pres = bandDb 3k–6k   − anchor"]
+    ANCHOR --> B4["air  = bandDb 8k–14k  − anchor"]
+```
+
+Four band balances are measured *relative to the speech core* (300–3000 Hz). Each
+is compared against a fixed **target balance** for clean speech:
+
+| Band | Region | Target (dB rel. anchor) | EQ shape |
+|---|---|---|---|
+| low | 60–200 | −2 | low shelf @ 200 |
+| mud | 200–450 | −1 | peak @ 320, Q 0.9 |
+| presence | 3000–6000 | −3 | peak @ 4000, Q 0.9 |
+| air | 8000–14000 | −10 | high shelf @ 8000 |
+
+### 4.2 Per-band decision — single-spectrum path
+
+`computeAutoEqBands` (used before denoise completes, dry spectrum only):
+
+```mermaid
+flowchart TB
+    START["per band"] --> G["gain = (target − measured) · strength"]
+    G --> EMPTY{"measured < −18 dB<br/>near-empty band?"}
+    EMPTY -->|"yes"| NOBOOST["clamp gain ≤ 0<br/>never boost hiss"]
+    EMPTY -->|"no"| CLAMP
+    NOBOOST --> CLAMP["clamp to [−6, +4] dB"]
+    CLAMP --> DEAD{"abs gain ≥ 1 dB<br/>deadzone?"}
+    DEAD -->|"yes"| EMIT["emit band"]
+    DEAD -->|"no"| DROP["drop"]
+```
+
+Cuts up to 6 dB (controlling excess is safe), boosts limited to 4 dB
+(conservative), deadzone 1 dB, wide shelves/bells only — no surgical notches.
+
+### 4.3 Per-band decision — noise-aware path
+
+When both the dry spectrum and the denoised voice profile exist
+(`computeNoiseAwareAutoEqBands`), **intent comes from the denoised voice** (so
+rumble/noise doesn't bias the target) but **boost magnitude is constrained by the
+dry spectrum**, because the user may lower Noise Reduction and re-expose
+background.
+
+```mermaid
+flowchart TB
+    START["per band"] --> G["gain = (target − voiceRel) · strength"]
+    G --> EMPTY{"voiceRel < −18 dB?"}
+    EMPTY -->|"yes"| CAP["gain ≤ 0"]
+    EMPTY -->|"no"| RISKY
+    CAP --> RISKY{"gain > 0 AND<br/>risky boost?<br/>presence/air"}
+    RISKY -->|"yes"| SCALE["gain ·= backgroundBoostScale"]
+    RISKY -->|"no"| LOWGUARD
+    SCALE --> LOWGUARD{"gain > 0 AND shelf AND<br/>dryRel ≥ target?<br/>rumble/bright guard"}
+    LOWGUARD -->|"yes"| ZERO["gain = 0"]
+    LOWGUARD -->|"no"| CLAMP
+    ZERO --> CLAMP["clamp [−6,+4], deadzone 1 dB"]
+    CLAMP --> EMIT["emit / drop"]
+```
+
+`backgroundBoostScale` (applied to presence @4k and air @8k boosts):
+
+```mermaid
+flowchart TB
+    S["scale = 1.0"] --> A{"dryRel ≥ target − 0.5?<br/>dry already bright here"}
+    A -->|"yes"| A1["scale ·= 0.25"]
+    A -->|"no"| B
+    A1 --> B{"removed = dryRel − voiceRel<br/>removed > 2 dB?"}
+    B -->|"yes"| B1["scale ·= clamp(1 − (removed−2)/8, 0, 1)<br/>→ toward 0 as more was removed"]
+    B -->|"no"| OUT["return scale"]
+    B1 --> OUT
+```
+
+Band wiring (`riskyBoost` flag in the last column):
+
+| Band | freq | type | risky boost? |
+|---|---|---|---|
+| low | 200 | low shelf | no (shelf rumble guard instead) |
+| mud | 320 | peak | no |
+| presence | 4000 | peak | **yes** |
+| air | 8000 | high shelf | **yes** |
+
+### 4.4 Worked example — the harsh-high-frequency failure this prevents
+
+A speaker with little natural high-frequency content, recorded with audible HF
+background (hiss, AC, harsh phone playback). Denoise strips the background, so the
+**denoised voice profile looks dull** up top. A naive curve from that profile
+alone adds a presence/air boost to "restore" brightness. Then the user lowers
+Noise Reduction (e.g. to 40–50 % to keep the voice natural) — the dry background,
+which also lived in those high bands, blends back in, now amplified. Harsh.
+
+The noise-aware path stops this: intent still says "this band is low," but
+`backgroundBoostScale` checks the dry profile first. Dry already bright there →
+boost scaled to 25 %; denoise removed a lot there → scaled toward zero. The boost
+survives only when the brightness is genuinely missing from *both* voice and
+background. The symmetric low-shelf guard does the same downward: a thin denoised
+voice won't trigger a low boost if the dry low end is already heavy (rumble).
+
+Locked in by [`tests/DspBehaviorTests.cpp`](../tests/DspBehaviorTests.cpp): the
+same dull denoised voice gets a presence boost > 1 dB with a *clean* dry signal,
+but < 1 dB with a *harsh* dry signal.
+
+### 4.5 Tone (independent user character)
+
+`toneAmountBands(amount)` layers a manual character on top of auto-EQ
+(−1 warm … +1 crisp): warm = low-shelf body boost + high-shelf soften; crisp =
+mud trim + air boost. `fullEqBands()` concatenates auto-EQ then tone.
+
+### 4.6 Strength
+
+`strength` (0..1) scales the whole corrective curve, set from Intensity via
+`applyIntensity`: `baseAutoEqStrength = 0.25 + 0.35 · intensity`. Default
+load-time strength is 0.6.
+
+---
+
+## 5. Noise reduction (blend) and the denoiser
+
+```mermaid
+flowchart TB
+    subgraph BG["DenoiseStreamer worker thread"]
+        SRC["original 48 kHz"] --> MONO["downmix to mono"]
+        MONO --> HOPS["hop-by-hop<br/>480 samples each"]
+        HOPS --> DFN["Denoiser → DeepFilterNet3"]
+        DFN --> DBUF["denoised buffer<br/>+ per-hop valid flags"]
+    end
+    PH["playhead frame"] -.prioritise.-> HOPS
+    DBUF --> BLEND
+    SRC --> BLEND{{"blend per sample:<br/>(1−wet)·dry + wet·den"}}
+    SLIDER["NR control 0–100%"] --> MAP["noiseReductionControlToBlend<br/>wet = pow(s, 0.74)"] --> BLEND
+    BLEND --> CHAIN["to VoiceChain"]
+```
+
+- The control percentage is bent through `noiseReductionControlToBlend(s) =
+  s^0.74` so the dial reaches the useful range earlier; endpoints preserved.
+- **This amount is currently 100 % user-chosen** — nothing measures the signal to
+  set it. That's the gap the planned auto-dial fills (§8).
+- The streamer ([`DenoiseStreamer.cpp`](../core/DenoiseStreamer.cpp)) prioritises
+  the playhead region, backfills the rest, compensates the model's 3-hop
+  look-ahead so denoised stays sample-aligned with dry (no comb filtering on
+  partial blends), and primes ~20 discarded warmup hops after a seek.
+- DeepFilterNet3 runs at 48 kHz mono, 480-sample hops, near-unlimited attenuation
+  (`attenLimDb = 100`).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Loading
+    Loading --> DryProfile: decode + analyse
+    DryProfile --> Denoising: streamer.start()
+    note right of DryProfile
+        auto-EQ from dry spectrum
+        voiceProfileUsesDenoised_ = false
+    end note
+    Denoising --> DenoisedProfile: full pass complete<br/>refreshVoiceProfileFromDenoised()
+    note right of DenoisedProfile
+        spectrum re-measured from denoised
+        noise-aware auto-EQ active
+        voiceProfileUsesDenoised_ = true
+    end note
+    DenoisedProfile --> [*]
+```
+
+---
+
+## 6. Parameter derivation (UI controls → ChainParams)
+
+```mermaid
+flowchart TB
+    NR["Noise Reduction %"] --> P_NR["noiseReductionAmount"]
+    TONE["Tone slider"] --> P_TONE["toneAmount"]
+    INT["Intensity %"] --> AI["applyIntensity"]
+    AI --> P_DRIVE["intensityDriveDb = −6 + 14·s"]
+    AI --> P_STR["baseAutoEqStrength = 0.25 + 0.35·s"]
+    LUFS["inputLufs at load"] --> CAL["computeCalibrationGainDb"]
+    CAL --> P_CAL["inputCalibrationGainDb<br/>= clamp(−24 − inputLufs, −18, +18)"]
+    P_STR --> AEQ["engine.autoEqBands strength"]
+    AEQ --> P_BANDS["autoEqBands"]
+    BASE["fixedVoiceCleanupParams"] --> OUT["ChainParams"]
+    P_NR --> OUT
+    P_TONE --> OUT
+    P_DRIVE --> OUT
+    P_CAL --> OUT
+    P_BANDS --> OUT
+    DEESS["de-ess sliders"] --> OUT
+    COMP["comp sliders"] --> OUT
+```
+
+`buildParams()` in [`MainComponent.cpp`](../desktop-juce/MainComponent.cpp)
+starts from `fixedVoiceCleanupParams()` and overlays the live control values.
+
+- **Calibration**: the file is trimmed toward `targetPreChainLufs = −24 LUFS`
+  (clamped ±18 dB) so the fixed-threshold compressors behave consistently
+  regardless of how hot the source was.
+- **Intensity** adds drive (−6…+8 dB) *and* raises auto-EQ strength.
+- **Auto-EQ bands** are recomputed at the current strength and injected; the
+  engine picks the noise-aware vs single-spectrum function based on
+  `voiceProfileUsesDenoised_`.
+- Presets (`Light/Balanced/Strong`) preset highpass, comp threshold/ratio,
+  target LUFS, and de-esser aggressiveness.
+
+---
+
+## 7. Offline vs live chain
+
+```mermaid
+flowchart LR
+    subgraph OFF["VoiceChain (offline / export)"]
+        O1["block = whole file"] --> O2["Limiter:<br/>2-pass look-ahead"] --> O3["Loudness:<br/>true BS.1770 two-pass"]
+    end
+    subgraph LIVE["LiveVoiceChain (preview)"]
+        L1["block-by-block,<br/>allocation-free"] --> L2["LiveLimiter:<br/>causal look-ahead latency"] --> L3["Loudness:<br/>single cached gain"]
+    end
+```
+
+Same stage order, deliberate differences
+([`LiveVoiceChain.h`](../core/LiveVoiceChain.h)):
+
+| Aspect | Offline `VoiceChain` | Live `LiveVoiceChain` |
+|---|---|---|
+| Granularity | whole buffer | per audio block, no allocation |
+| Loudness | exact two-pass measure → gain | single gain from cached input LUFS + target |
+| Limiter | offline two-pass | causal `LiveLimiter` (adds latency) |
+| Params | passed to `prepare` | pushed lock-light from message thread |
+| Used by | `process()`, `exportTo()` | `PreviewPlayer` audio callback |
+
+The live loudness uses `measureChainLoudness()` (an offline pass on a copy) to
+estimate the level arriving at the loudness stage, so the cached live gain still
+hits the target despite compression. Export always uses the offline chain for an
+exact render.
+
+---
+
+## 8. Backing music and ducking
+
+```mermaid
+flowchart LR
+    CLIPS["music clips<br/>gain + fades + offset"] --> REND["render mix"]
+    VOICE["processed voice"] -->|"sidechain key"| DUCK
+    REND --> DUCK["Ducker"]
+    DUCK --> SUM{"{+ voice"}}
+    SUM --> OUTM["preview output"]
+```
+
+`Ducker` ([`Ducker.h`](../core/Ducker.h)) is a sidechain ducker: the voice keys
+the music down. A look-ahead delay on the music lets the duck start just before
+the voice transient. `blend` morphs full-band ducking (0) → mid-band-only
+(250 Hz–4 kHz) ducking (1), so at blend 1 the music's lows and highs pass through
+(dynamic-EQ-style duck):
 
 ```
-0. pre-gain        (inputCalibrationGainDb + intensityDriveDb)
-1. high-pass       (rumble removal, biquad per channel)
-2. EQ              (auto-EQ bands + tone bands)
-3. fast compressor (fast peak control)
-4. glue compressor (slower, denser)
-5. de-esser        (sibilance, after compression which accentuates it)
-6. loudness        (normalize toward target LUFS)
-7. limiter         (guard ceiling after loudness gain)
+out = m − (1 − g) · ( m·(1 − blend) + mid·blend )
 ```
 
-Each stage reads its own fields from a single `ChainParams` struct
-([`core/Presets.h`](../core/Presets.h)). Adding a stage means adding fields, not
-changing the chain interface. Every stage except EQ uses **fixed numeric
-parameters** (chosen by preset / intensity); EQ is the one data-driven stage.
-
-The blend step (`blendNoiseReduction`) lives in
-[`ProcessingEngine.cpp`](../desktop-juce/ProcessingEngine.cpp), *not* in the
-chain — it runs first, then `VoiceChain::process` runs on the result.
+> **Divergence to note:** ducking currently lives in the **live preview**
+> (`PreviewPlayer` + `Ducker`). The offline `ProcessingEngine::mixMusicInto` adds
+> music with gain + fades only — it does **not** duck. Export music is therefore
+> not sidechain-ducked today.
 
 ---
 
-## 3. How each decision is currently made
+## 9. Analysis caching
 
-### 3.1 Noise-reduction amount (the human dial today)
+`loadMedia` caches everything reusable so a reopened file is instantly "prepared"
+without re-running the model:
 
-- The UI has a "Noise Reduction" encoder, 0–100 % (default 75 %).
-- The raw percentage is bent through
-  `noiseReductionControlToBlend(amount01) = pow(amount01, 0.74)`
-  ([`Presets.h`](../core/Presets.h)) so the control feels more linear
-  perceptually, then stored as `ChainParams::noiseReductionAmount`.
-- At render time, `blendNoiseReduction(original, denoised, amount)` does a simple
-  linear crossfade per sample: `dry*(1-wet) + den*wet`.
-- **This number is currently chosen entirely by the user.** Nothing measures the
-  signal to suggest it. That is exactly the gap the new feature fills.
+```mermaid
+flowchart LR
+    KEY["path + sizeBytes + modifiedMs<br/>+ schemaVersion"] --> VALID{"cache valid?"}
+    VALID -->|"yes"| LOAD["load LUFS, peak,<br/>both spectra, waveform peaks"]
+    VALID -->|"no"| COMPUTE["measure + analyse + save"]
+    LOAD --> READY["prepared"]
+    COMPUTE --> READY
+```
 
-The denoised signal comes from `DenoiseStreamer` wrapping DeepFilterNet3
-(`core/Denoiser.*`, `core/DenoiseStreamer.*`): a neural model at 48 kHz mono, run
-hop-by-hop on a background thread, faster than real time, playhead-prioritized so
-the region you're about to hear denoises first. The model is allowed
-near-unlimited attenuation (`attenLimDb = 100`).
-
-### 3.2 EQ — the only *measured* decision in the chain
-
-This is the heart of "how decisions are made," and the closest existing analogue
-to what the noise-reduction auto-dial needs to do.
-
-**Inputs.** A whole-file average spectrum (Welch's method, 4096-pt FFTs averaged
-across the file — `core/SpectrumAnalyzer.cpp`), computed once at load and cached.
-Two spectra are tracked:
-
-- **Dry spectrum** (`drySpectrum_`) — measured from the raw original. Available
-  immediately at load.
-- **Denoised voice profile** (`spectrum_`) — measured from the *fully denoised*
-  buffer once the background pass finishes (`refreshVoiceProfileFromDenoised`).
-  Using the denoised voice means room noise / rumble doesn't bias the curve.
-
-**How the curve is derived** (`computeAutoEqBands` / `computeNoiseAwareAutoEqBands`
-in [`core/Eq.cpp`](../core/Eq.cpp)):
-
-1. Measure four band levels *relative to a speech-core anchor* (300–3000 Hz):
-   - low (60–200), mud (200–450), presence (3000–6000), air (8000–14000).
-2. Compare each against a fixed **target balance** for clean speech
-   (`lowTarget=-2, mudTarget=-1, presTarget=-3, airTarget=-10` dB rel. anchor).
-3. `gain = (target - measured) * strength`, then clamp:
-   - cuts up to 6 dB (controlling excess is safe), boosts up to 4 dB
-     (conservative);
-   - never boost a near-empty band (`< -18 dB` rel) — that just amplifies hiss;
-   - deadzone of 1 dB so tiny moves are dropped.
-4. Only shelves and broad bells — no surgical notches.
-
-**Noise-aware variant.** When both spectra exist,
-`computeNoiseAwareAutoEqBands` uses the *denoised* profile to decide intent but
-constrains boosts using the *dry* profile, because the user may dial the blend
-back down and re-expose background energy:
-
-- If the dry signal already has enough energy in a band, scale a boost there to
-  25 % (you'd mostly be brightening noise that comes back).
-- If denoise removed a lot from a band (`dryRel - voiceRel > 2 dB`), assume the
-  missing energy was background and get progressively more conservative.
-- Never add low-end boost when the dry signal is already low-heavy (rumble).
-
-This pattern — **measure dry vs. denoised, compare band balances, decide an
-amount** — is the template the noise-reduction auto-dial should follow.
-
-**Strength.** `strength` (0..1) scales the whole correction. It's set from the
-"intensity" control via `applyIntensity`: `baseAutoEqStrength = 0.25 + 0.35*s`.
-The default load-time strength is `0.6`.
-
-### 3.3 Calibration gain & intensity drive
-
-- The file's integrated loudness is measured once at load (`inputLufs_`).
-- `computeCalibrationGainDb` trims the file to a working level
-  (`targetPreChainLufs = -24 LUFS`, clamped ±18 dB) so the fixed-threshold
-  compressors behave consistently regardless of how hot the source was.
-- The "intensity" control adds `intensityDriveDb = -6 + 14*s` dB of extra drive
-  on top, and also raises auto-EQ strength (above).
-
-### 3.4 Compression, de-essing, loudness, limiter
-
-All **fixed** per preset (`paramsForPreset` / `fixedVoiceCleanupParams`):
-
-- Two compressors in series: a fast one (ratio 10, ~1.5 ms attack) for peaks,
-  then a glue one (ratio 2.5, 20 ms attack) for density.
-- De-esser at ~6.2 kHz with a presence-threshold gate so it only ducks true
-  sibilance.
-- Loudness normalizer targets `-16 LUFS` (Strong preset: `-14`).
-- Limiter ceiling `-1 dBFS`.
-
-None of these adapt to content beyond the load-time calibration gain. They are
-not part of the auto-dial scope.
+Schema-versioned JSON keyed by path + size + mtime
+([`ProcessingEngine.cpp`](../desktop-juce/ProcessingEngine.cpp),
+`kAnalysisCacheVersion`). Stores derived analysis only — never heavy denoised or
+processed audio buffers. Invalidated on identity, mtime, or schema change.
 
 ---
 
-## 4. Engine orchestration (`ProcessingEngine`)
+## 10. Planned feature — automatic noise-reduction dial-in
 
-[`desktop-juce/ProcessingEngine.cpp`](../desktop-juce/ProcessingEngine.cpp) is
-the conductor. Relevant responsibilities for the new feature:
+Goal: instead of the user picking a noise-reduction %, **measure the separation
+between voice and background and choose the amount automatically** — more
+reduction when the background is loud, less (≈40–50 %) when the voice is already
+clearly intelligible and only needs cleanup.
 
-- **`loadMedia`**: FFmpeg-decodes to a WAV, measures input LUFS + peak, analyzes
-  the dry spectrum, computes initial auto-EQ at strength 0.6, kicks off the
-  background denoise, and caches all of it (schema-versioned JSON keyed by path +
-  size + mtime).
-- **`refreshVoiceProfileFromDenoised`**: once the *whole-file* denoise completes,
-  re-measure the spectrum from the denoised buffer, swap it in as the active
-  voice profile, recompute auto-EQ, re-cache. After this call,
-  `voiceProfileUsesDenoised()` is true and both `drySpectrum()` and `spectrum()`
-  (denoised) are available — **this is the moment both signals needed for an
-  automatic noise estimate are present.**
-- **`previewSpectrum(amount)`**: power-blends dry and denoised spectra for the
-  live UI preview at a given noise-reduction amount. Useful for *showing* the
-  effect of an auto-chosen amount.
-- **`process(params)`**: blend → run chain → mix music → store result. This is
-  the authoritative offline render (also used by export).
+```mermaid
+flowchart TB
+    DRY["dry spectrum<br/>voice + background"] --> DIFF
+    DEN["denoised profile<br/>voice"] --> DIFF{{"dry − denoised<br/>= estimated background"}}
+    DIFF --> METRIC["separation / SNR metric<br/>weighted to non-speech bands"]
+    METRIC --> MAP["saturating map → amount<br/>floor ≈40–50%, ceiling ≈90–100%"]
+    MAP --> SUGGEST["suggestedNoiseReductionAmount"]
+    SUGGEST -.seed once when ready.-> SLIDER["NR control"]
+```
 
-### Threading / state model
-
-- Denoise runs on a background worker; playback uses the dry signal until hops
-  fill in. `hasDenoised()` / `streamer_.isComplete()` gate when the full denoised
-  buffer is usable.
-- Spectra and the denoised waveform peaks are persisted in the analysis cache so
-  a re-opened file is "prepared" instantly without re-running the model.
-
----
-
-## 5. Designing the automatic noise-reduction dial-in
-
-Goal: instead of the user picking a noise-reduction percentage, **measure the
-separation between voice and background and choose the amount automatically** —
-more reduction when the background is loud, less (e.g. 40–50 %) when the voice is
-already clearly intelligible and only needs cleanup.
-
-### 5.1 What we already have to work with
-
-Everything needed to *estimate* background level is already computed and cached:
+This is a sibling of `computeNoiseAwareAutoEqBands` — same dry-vs-denoised
+comparison. Everything needed already exists and is cached:
 
 | Signal | Source | Meaning |
 |---|---|---|
-| `drySpectrum()` | original audio | voice **+** background |
-| `spectrum()` (denoised) | DeepFilterNet output | voice with background largely removed |
-| `inputLufs()`, `inputPeakDb()` | load-time measurement | overall level of the dry signal |
-| `previewSpectrum(amount)` | power blend | what a chosen amount would look like |
+| `drySpectrum()` | original | voice + background |
+| `spectrum()` (denoised) | model output | voice |
+| `inputLufs()`, `inputPeakDb()` | load measurement | overall dry level |
+| `previewSpectrum(amount)` | power blend | what a chosen amount looks like |
 
-The **difference between the dry and denoised spectra is, by construction, an
-estimate of what the denoiser considers background/noise.** A large dry-minus-
-denoised gap (especially outside the speech core) means a loud, separable
-background → push the amount up. A small gap means the model found little to
-remove → the voice is already clean → a gentler 40–50 % blend just tidies it.
+**Design constraints / fit:**
 
-This is the same dry-vs-denoised comparison the noise-aware auto-EQ already does
-in `computeNoiseAwareAutoEqBands`; the auto-dial is a sibling of that function.
+- Keep the metric→amount mapping a pure function in `vc_core` next to
+  `noiseReductionControlToBlend`; add a behavior test.
+- A reliable estimate needs the *full* denoised profile (after
+  `refreshVoiceProfileFromDenoised`). Offer a provisional value from the dry
+  spectrum at load, refine when denoised — mirroring how auto-EQ upgrades.
+- The encoder is the source of truth (`buildParams` reads the slider), so the
+  cleanest first version **seeds the slider once** when analysis completes rather
+  than continuously driving it.
+- If derived purely from cached spectra it needs no extra persistence; storing
+  the suggestion in the analysis cache (bump `kAnalysisCacheVersion`) keeps it
+  stable across reopens.
 
-### 5.2 Suggested approach (broad-stroke, for discussion)
-
-1. **Compute a "noise floor / separation" metric** from `drySpectrum()` vs.
-   `spectrum()`. Candidates:
-   - Broadband energy removed: `bandDb(dry) - bandDb(denoised)` over the full
-     range, or weighted toward non-speech bands (below ~200 Hz and above
-     ~6 kHz, where noise lives and speech doesn't).
-   - A crude SNR proxy: denoised energy in the speech core vs. removed energy
-     elsewhere.
-2. **Map the metric to an amount** with a saturating curve (loud background →
-   toward ~90–100 %; clean voice → floor around ~40–50 %, never 0 unless the
-   removed energy is negligible). Keep the mapping in `core/` next to
-   `noiseReductionControlToBlend` so CLI and UI share it and it's testable.
-3. **Plumb it through** the way auto-EQ already flows: compute it when both
-   profiles exist (after `refreshVoiceProfileFromDenoised`), expose a
-   `suggestedNoiseReductionAmount()` on `ProcessingEngine`, and let the UI either
-   apply it automatically or seed the encoder with it.
-4. **Validate visually** with `previewSpectrum(amount)` and the existing spectrum
-   view before committing.
-
-### 5.3 Architectural fit / constraints
-
-- **Keep it in `vc_core`, pure and testable.** The metric→amount mapping should
-  be a free function over two `SpectrumResult`s (plus maybe LUFS), mirroring
-  `computeNoiseAwareAutoEqBands`. Add a behavior test in
-  [`tests/DspBehaviorTests.cpp`](../tests/DspBehaviorTests.cpp).
-- **Timing.** A reliable estimate needs the *full* denoised profile, i.e. after
-  the background pass finishes. At load you can offer a provisional value from
-  the dry spectrum alone (high background → high default), then refine once
-  denoised. Mirror how auto-EQ starts at dry and upgrades to noise-aware.
-- **Don't fight the user.** Decide whether the auto value seeds the control
-  (user can override) or continuously drives it. The current code treats the
-  encoder as the source of truth (`buildParams` reads the slider), so the
-  cleanest first version *sets the slider once* when analysis completes.
-- **Caching.** If the chosen amount is derived purely from cached spectra it
-  doesn't need separate persistence, but storing the computed suggestion in the
-  analysis-cache JSON (bump `kAnalysisCacheVersion`) avoids recomputing and keeps
-  the value stable across reopens.
-
-### 5.4 Open questions to settle before implementing
-
-- Should the metric be broadband, or band-weighted toward known noise regions?
-- What are the floor/ceiling amounts (e.g. 40 % min, 95 % max) and the shape of
-  the mapping between them?
-- Auto-apply vs. suggest-and-seed?
-- Does music presence affect the estimate? (Music is mixed *after* the chain, so
-  it shouldn't bias the voice spectra — but worth confirming.)
-</content>
-</invoke>
+**Open questions:** broadband vs band-weighted metric? floor/ceiling amounts and
+curve shape? auto-apply vs suggest-and-seed? (Music is mixed after the chain, so
+it shouldn't bias the voice spectra — confirm.)

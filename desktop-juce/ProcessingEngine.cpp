@@ -151,14 +151,8 @@ vc::AudioBuffer ProcessingEngine::blendNoiseReduction(const vc::AudioBuffer& ori
     return out;
 }
 
-bool ProcessingEngine::loadAnalysisCache(const juce::File& media) {
-    const auto cache = cacheFileFor(media);
-    if (!cache.existsAsFile())
-        return false;
-
-    juce::var parsed;
-    juce::JSON::parse(cache.loadFileAsString(), parsed);
-    auto* root = parsed.getDynamicObject();
+bool ProcessingEngine::applyAnalysisCacheState(const juce::var& state, const juce::File& media) {
+    auto* root = state.getDynamicObject();
     if (root == nullptr)
         return false;
 
@@ -190,9 +184,25 @@ bool ProcessingEngine::loadAnalysisCache(const juce::File& media) {
     return true;
 }
 
-void ProcessingEngine::saveAnalysisCache() const {
+bool ProcessingEngine::loadAnalysisCache(const juce::File& media) {
+    if (applyAnalysisCacheState(pendingProjectAnalysisCache_, media)) {
+        pendingProjectAnalysisCache_ = juce::var();
+        return true;
+    }
+    pendingProjectAnalysisCache_ = juce::var();
+
+    const auto cache = cacheFileFor(media);
+    if (!cache.existsAsFile())
+        return false;
+
+    juce::var parsed;
+    juce::JSON::parse(cache.loadFileAsString(), parsed);
+    return applyAnalysisCacheState(parsed, media);
+}
+
+juce::var ProcessingEngine::makeAnalysisCacheState() const {
     if (sourceFile_ == juce::File() || !drySpectrum_.valid || !spectrum_.valid || voiceWaveformPeaks_.empty())
-        return;
+        return {};
 
     auto root = std::make_unique<juce::DynamicObject>();
     root->setProperty("schemaVersion", kAnalysisCacheVersion);
@@ -206,8 +216,19 @@ void ProcessingEngine::saveAnalysisCache() const {
     root->setProperty("voiceProfileUsesDenoised", voiceProfileUsesDenoised_);
     root->setProperty("voiceWaveformPeaks", floatVectorToVar(voiceWaveformPeaks_));
     root->setProperty("processedVoiceWaveformPeaks", floatVectorToVar(processedVoiceWaveformPeaks_));
+    return juce::var(root.release());
+}
 
-    cacheFileFor(sourceFile_).replaceWithText(juce::JSON::toString(juce::var(root.release())));
+void ProcessingEngine::setProjectAnalysisCache(const juce::var& state) {
+    pendingProjectAnalysisCache_ = state;
+}
+
+void ProcessingEngine::saveAnalysisCache() const {
+    const auto state = makeAnalysisCacheState();
+    if (state.getDynamicObject() == nullptr)
+        return;
+
+    cacheFileFor(sourceFile_).replaceWithText(juce::JSON::toString(state));
 }
 
 void ProcessingEngine::mixMusicInto(vc::AudioBuffer& dest, const std::vector<MusicClip>& clips,
@@ -338,6 +359,18 @@ void ProcessingEngine::clear() {
     inputPeakDb_ = -120.0;
     lastInputLufs_ = 0.0;
     lastGainDb_ = 0.0;
+    pendingProjectAnalysisCache_ = juce::var();
+}
+
+float ProcessingEngine::waveformDisplayGain() const {
+    // Display target loudness; matches the chain's default normalization target.
+    constexpr double kDisplayTargetLufs = -16.0;
+    // inputLufs_ is 0.0 until measured, and very low for silence — leave those at
+    // unity so we never blow the display up.
+    if (inputLufs_ >= -0.001 || inputLufs_ < -120.0)
+        return 1.0f;
+    const double gainDb = juce::jlimit(-12.0, 24.0, kDisplayTargetLufs - inputLufs_);
+    return static_cast<float>(std::pow(10.0, gainDb / 20.0));
 }
 
 std::vector<vc::EqBand> ProcessingEngine::autoEqBands(double strength) const {
@@ -423,6 +456,14 @@ void ProcessingEngine::setMusicClipParams(int index, double startSeconds, double
     clip.lengthSeconds = lengthSeconds <= 0.0
         ? available
         : std::clamp(lengthSeconds, 0.1, available);
+}
+
+void ProcessingEngine::setMusicClipWaveformPeaks(int index, std::vector<float> peaks, int processedColumns) {
+    if (index < 0 || index >= static_cast<int>(musicClips_.size()) || peaks.empty())
+        return;
+    auto& clip = musicClips_[static_cast<std::size_t>(index)];
+    clip.waveformProcessedColumns = juce::jlimit(0, static_cast<int>(peaks.size()), processedColumns);
+    clip.waveformPeaks = std::move(peaks);
 }
 
 bool ProcessingEngine::processMusicWaveformChunks(int maxColumns) {

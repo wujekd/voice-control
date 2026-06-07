@@ -10,6 +10,7 @@ constexpr float kClipEdgeHitTopInset = 10.0f;
 constexpr float kClipEdgeHitWidth = 16.0f;
 constexpr float kVoiceLaneHeight = 96.0f;
 constexpr int kMusicLaneHeight = 88;
+constexpr float kLaneGap = 4.0f;
 
 void drawLaneLabel(juce::Graphics& g, juce::Rectangle<float> lane, const juce::String& text) {
     auto label = juce::Rectangle<float>(lane.getX() + 8.0f, lane.getBottom() - 26.0f,
@@ -26,7 +27,9 @@ void MusicTimeline::setVoice(const juce::AudioBuffer<float>* voice, double sampl
 }
 
 void MusicTimeline::setVoiceWaveformPeaks(const std::vector<float>* dryPeaks,
-                                          const std::vector<float>* processedPeaks) {
+                                          const std::vector<float>* processedPeaks,
+                                          float displayGain) {
+    voiceWaveformGain_ = displayGain;
     const bool hasProcessed = processedPeaks != nullptr && !processedPeaks->empty();
     if (hasProcessed && !hadProcessedVoicePeaks_)
         voiceWaveformTransition_ = 0.0f;
@@ -39,6 +42,14 @@ void MusicTimeline::setVoiceWaveformPeaks(const std::vector<float>* dryPeaks,
     processedVoicePeaks_ = processedPeaks;
     if (hasProcessed)
         hadProcessedVoicePeaks_ = true;
+    repaint();
+}
+
+void MusicTimeline::setVoiceNoiseReduction(float amount01) {
+    const float clamped = juce::jlimit(0.0f, 1.0f, amount01);
+    if (std::abs(clamped - voiceNoiseReduction_) < 1e-4f)
+        return;
+    voiceNoiseReduction_ = clamped;
     repaint();
 }
 
@@ -68,15 +79,18 @@ double MusicTimeline::timelineDurationSeconds() const {
 }
 
 juce::Rectangle<float> MusicTimeline::timelineBounds() const {
-    return getLocalBounds().reduced(10).toFloat();
+    return getLocalBounds().toFloat();
 }
 
 juce::Rectangle<float> MusicTimeline::voiceLaneBounds() const {
-    return timelineBounds().removeFromTop(kVoiceLaneHeight);
+    const auto b = timelineBounds();
+    return { b.getX(), b.getY(), b.getWidth(), kVoiceLaneHeight };
 }
 
 juce::Rectangle<float> MusicTimeline::musicLaneBounds() const {
-    return getLocalBounds().reduced(10).removeFromBottom(kMusicLaneHeight).toFloat();
+    const auto b = timelineBounds();
+    return { b.getX(), b.getY() + kVoiceLaneHeight + kLaneGap, b.getWidth(),
+             static_cast<float>(kMusicLaneHeight) };
 }
 
 double MusicTimeline::secondsToX(double seconds) const {
@@ -221,15 +235,15 @@ void MusicTimeline::drawWaveformPeaks(juce::Graphics& g, juce::Rectangle<float> 
     const float midY = area.getCentreY();
     const float halfH = area.getHeight() * 0.38f;
     const int width = std::max(1, static_cast<int>(area.getWidth()));
-    float maxPeak = 0.001f;
-    for (float p : peaks)
-        maxPeak = std::max(maxPeak, p);
 
+    // Scale to the normalized (heard) level on a fixed reference, not each clip's
+    // own peak — so a quiet take and a loud take display at the level you hear,
+    // instead of both being auto-stretched to full height.
     for (int x = 0; x < width; ++x) {
         const int index = static_cast<int>(
             static_cast<int64_t>(x) * static_cast<int64_t>(peaks.size()) / width);
-        const float peak = juce::jlimit(0.0f, 1.0f,
-            peaks[static_cast<std::size_t>(std::min(index, static_cast<int>(peaks.size()) - 1))] / maxPeak);
+        const float raw = peaks[static_cast<std::size_t>(std::min(index, static_cast<int>(peaks.size()) - 1))];
+        const float peak = juce::jlimit(0.0f, 1.0f, raw * voiceWaveformGain_);
         const float px = area.getX() + static_cast<float>(x);
         g.drawVerticalLine(static_cast<int>(px), midY - peak * halfH, midY + peak * halfH);
     }
@@ -242,10 +256,23 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
     const bool hasDryPeaks = dryVoicePeaks_ != nullptr && !dryVoicePeaks_->empty();
     const bool hasProcessedPeaks = processedVoicePeaks_ != nullptr && !processedVoicePeaks_->empty();
     if (hasDryPeaks) {
-        const float transition = juce::jlimit(0.0f, 1.0f, voiceWaveformTransition_);
-        drawWaveformPeaks(g, area, *dryVoicePeaks_, hasProcessedPeaks ? 1.0f - transition : 1.0f);
-        if (hasProcessedPeaks)
-            drawWaveformPeaks(g, area, *processedVoicePeaks_, transition);
+        if (!hasProcessedPeaks) {
+            drawWaveformPeaks(g, area, *dryVoicePeaks_, 1.0f);
+            return;
+        }
+        // Blend dry -> denoised by the noise-reduction amount, so the waveform
+        // shows what you hear: at 0% the full take (background and all), at 100%
+        // only the cleaned voice. voiceWaveformTransition_ eases the denoised
+        // peaks in when they first become available so it doesn't pop.
+        const float weight = juce::jlimit(0.0f, 1.0f, voiceNoiseReduction_)
+                           * juce::jlimit(0.0f, 1.0f, voiceWaveformTransition_);
+        const auto& dry = *dryVoicePeaks_;
+        const auto& proc = *processedVoicePeaks_;
+        const std::size_t n = std::min(dry.size(), proc.size());
+        std::vector<float> blended(n, 0.0f);
+        for (std::size_t i = 0; i < n; ++i)
+            blended[i] = (1.0f - weight) * dry[i] + weight * proc[i];
+        drawWaveformPeaks(g, area, blended, 1.0f);
         return;
     }
 
@@ -286,7 +313,7 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
 }
 
 void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, juce::Rectangle<float> area) {
-    auto wave = area.reduced(7.0f, 2.0f);
+    auto wave = area.reduced(0.0f, 2.0f);
     if (wave.getWidth() < 3.0f || wave.getHeight() < 3.0f || clip.waveformPeaks.empty())
         return;
 
@@ -439,9 +466,8 @@ void MusicTimeline::drawGapPluses(juce::Graphics& g) {
 
 void MusicTimeline::paint(juce::Graphics& g) {
     g.fillAll(juce::Colour(0xff252932));
-    auto r = timelineBounds();
-    auto voiceLane = r.removeFromTop(kVoiceLaneHeight);
-    auto musicLane = musicLaneBounds();
+    const auto voiceLane = voiceLaneBounds();
+    const auto musicLane = musicLaneBounds();
 
     drawWaveform(g, voiceLane);
     drawLaneLabel(g, voiceLane, "Voice waveform");
