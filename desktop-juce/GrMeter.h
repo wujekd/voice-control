@@ -144,7 +144,7 @@ public:
         g.setFont(juce::Font(juce::FontOptions(12.0f)));
         g.drawText(label_, labelArea, juce::Justification::centredLeft);
 
-        auto track = r.reduced(0, 1).toFloat();
+        auto track = r.reduced(0, 3).toFloat();
         g.setColour(juce::Colour(0xff14161b));
         g.fillRoundedRectangle(track, 3.0f);
 

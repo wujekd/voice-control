@@ -19,6 +19,7 @@
 #include <atomic>
 #include <functional>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,11 @@ private:
         void drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
                               float sliderPosProportional, float rotaryStartAngle,
                               float rotaryEndAngle, juce::Slider& slider) override;
+        void markCompact(juce::Slider& slider) { compactSliders_.insert(&slider); }
+        juce::Font getSliderPopupFont(juce::Slider& slider) override;
+
+    private:
+        std::unordered_set<juce::Slider*> compactSliders_;
     };
 
     void loadFile(const juce::File& file);
@@ -81,6 +87,8 @@ private:
     void updateMusicTimeline();
     void togglePlay();
     void updateListenButton();
+    void updateDuckingUi();
+    void updateMusicMuteUi();
     void updateEqView();
     void updateLiveSpectrum();
     void updateMusicSpectrum();
@@ -92,14 +100,16 @@ private:
     void openProjectFile(const juce::File& file);
     void deleteProjectFile(const juce::File& file);
     void saveCurrentProject();
-    void saveAsNewProject();
+    void saveAsNewProject(std::function<void(bool saved)> onComplete = {});
     void promptForProjectName(const juce::String& title, const juce::String& defaultName,
-                              std::function<void(juce::String)> onName);
-    bool maybeSaveBeforeReplacingSession();
+                              std::function<void(juce::String)> onName,
+                              std::function<void()> onCancel = {});
+    void maybeSaveBeforeReplacingSession(std::function<void(bool proceed)> onDone);
     void clearProject();
     void markProjectDirty();
     bool hasProjectContent() const;
     void saveAutosaveSession();
+    void saveAnalysisFileForCurrentMedia();
     void restoreAutosaveSession();
     juce::var makeProjectState() const;
     bool applyProjectState(const juce::var& state, bool fromAutosave);
@@ -168,7 +178,7 @@ private:
     // Background ducking: voice sidechains the backing music. Look-ahead +
     // reduction behave like a sidechain compressor; "Mid focus" blends from
     // full-band ducking toward mid-band-only (dynamic-EQ-style) ducking.
-    juce::TextButton duckBypassButton_ { "Bypass" }; // bypass the sidechain ducker
+    juce::TextButton duckOnOffButton_ { "Off" };
     juce::Label duckCaption_, duckLookAheadLabel_, duckReductionLabel_, duckFilterLabel_;
     juce::Slider duckLookAheadSlider_, duckReductionSlider_, duckFilterSlider_;
     DuckView duckView_;
@@ -184,6 +194,8 @@ private:
         double gainDb = -18.0;
         double fadeInSeconds = 1.0;
         double fadeOutSeconds = 1.0;
+        std::vector<float> waveformPeaks;
+        int waveformProcessedColumns = 0;
     };
     struct MusicUndoState {
         std::vector<MusicClip> clips;
@@ -192,6 +204,7 @@ private:
     std::vector<MusicUndoState> musicUndoStack_;
     std::vector<PendingMusicClipRestore> pendingMusicClipRestore_;
     int pendingSelectedMusicClipRestore_ = -1;
+    juce::var pendingProjectAnalysisCache_;
     // Per-clip (fadeIn, fadeOut) captured at drag start, so overlap crossfades
     // can be reset when clips are pulled apart again.
     std::vector<std::pair<double, double>> musicClipFadeSnapshot_;

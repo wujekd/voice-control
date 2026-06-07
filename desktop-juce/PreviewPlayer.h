@@ -48,6 +48,12 @@ public:
     // Latest post-duck music output (mono) for the DuckView waveform.
     void readMusicAnalysisBlock(float* dest, int n) const;
     void setMutedMusicClipIndex(int index) { mutedMusicClipIndex_.store(index, std::memory_order_relaxed); }
+    // Mute the whole backing-music channel (voice only) without touching gains.
+    void setMusicMuted(bool muted) { musicMuted_.store(muted, std::memory_order_relaxed); }
+    bool isMusicMuted() const { return musicMuted_.load(std::memory_order_relaxed); }
+    // Bypass the sidechain ducker so the backing music plays at its full level.
+    void setDuckBypassed(bool bypassed) { duckBypassed_.store(bypassed, std::memory_order_relaxed); }
+    bool isDuckBypassed() const { return duckBypassed_.load(std::memory_order_relaxed); }
     void clearSources();
 
     void setParams(const vc::ChainParams& params) { chain_.setParams(params); }
@@ -117,6 +123,8 @@ private:
     std::atomic<bool> playing_ { false };
     std::atomic<bool> showAfter_ { false };
     std::atomic<int> mutedMusicClipIndex_ { -1 };
+    std::atomic<bool> musicMuted_ { false };
+    std::atomic<bool> duckBypassed_ { false };
     std::atomic<float> noiseReductionAmount_ { 1.0f };
     std::atomic<float> rmsLevelDb_ { -90.0f };
     std::atomic<float> peakLevelDb_ { -90.0f };

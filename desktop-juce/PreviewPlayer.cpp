@@ -115,6 +115,8 @@ void PreviewPlayer::mixMusicInto(juce::AudioBuffer<float>& dest, int startSample
     const int outChannels = dest.getNumChannels();
     if (outChannels <= 0 || numSamples <= 0)
         return;
+    if (musicMuted_.load(std::memory_order_relaxed))
+        return; // music channel fully muted; scratch stays silent
 
     const int mutedIndex = mutedMusicClipIndex_.load(std::memory_order_relaxed);
     const float targetMasterGain = static_cast<float>(std::pow(
@@ -289,7 +291,9 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
     mixMusicInto(musicScratch_, 0, produced, timelineStartSeconds);
 
     ducker_.setLookAheadMs(duckLookAheadMs_.load(std::memory_order_relaxed));
-    ducker_.setMaxReductionDb(duckMaxReductionDb_.load(std::memory_order_relaxed));
+    ducker_.setMaxReductionDb(duckBypassed_.load(std::memory_order_relaxed)
+                                  ? 0.0f
+                                  : duckMaxReductionDb_.load(std::memory_order_relaxed));
     ducker_.setBlend(duckBlend_.load(std::memory_order_relaxed));
     ducker_.process(musicScratch_.getArrayOfWritePointers(), mch, produced, keyMono_.data());
     musicDuckReductionDb_.store(ducker_.lastReductionDb(), std::memory_order_relaxed);

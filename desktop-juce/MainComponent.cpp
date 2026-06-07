@@ -10,11 +10,23 @@ constexpr int kMinWindowWidth = kDefaultWindowWidth - 70; // floor before things
 constexpr int kOuterMargin = 16;
 constexpr int kBottomBreathingRoom = 0;
 constexpr int kSpectrumHeight = 102;
+constexpr int kWaveformSectionGap = 4;               // EQ↔voice and voice↔music
+constexpr int kVoiceLaneHeight = 96;
+constexpr int kMusicLaneHeight = 88;
+constexpr int kTimelineHeight = kVoiceLaneHeight + kWaveformSectionGap + kMusicLaneHeight;
+constexpr int kGrMeterRowHeight = 18;
+constexpr int kOutputMeterRowHeight = 20;
+constexpr int kMeterRowGap = 2;
+constexpr int kMetersBottomGap = 6;
+constexpr int kMetersSectionHeight = kGrMeterRowHeight + kMeterRowGap
+    + kGrMeterRowHeight + kMeterRowGap
+    + kGrMeterRowHeight + kMeterRowGap
+    + kOutputMeterRowHeight + kMetersBottomGap;
 constexpr int kDefaultWindowHeight = kOuterMargin * 2
-    + (20 + 2 + 20 + 2 + 20 + 2 + 24 + 6)            // meters (matches resized())
+    + kMetersSectionHeight                           // meters (matches resized())
     + (138 + 8)                                      // main controls
-    + (kSpectrumHeight + 6)                          // spectrum
-    + (216 + 8)                                      // timeline
+    + kSpectrumHeight + kWaveformSectionGap          // spectrum + gap to voice lane
+    + (kTimelineHeight + 8)                          // timeline
     + (116 + 8)                                      // music controls
     + (18)                                           // progress
     + kBottomBreathingRoom;
@@ -73,6 +85,20 @@ void addNumber(juce::DynamicObject& obj, const juce::Identifier& id, double valu
     obj.setProperty(id, value);
 }
 
+std::vector<float> floatVectorProperty(const juce::DynamicObject* obj, const juce::Identifier& id) {
+    std::vector<float> out;
+    if (obj == nullptr || !obj->hasProperty(id))
+        return out;
+    const auto value = obj->getProperty(id);
+    if (!value.isArray())
+        return out;
+    const auto* arr = value.getArray();
+    out.reserve(static_cast<std::size_t>(arr->size()));
+    for (const auto& v : *arr)
+        out.push_back(static_cast<float>(static_cast<double>(v)));
+    return out;
+}
+
 // DialogWindow that reports its own close (native close button / escape key)
 // back to the owner so the unique_ptr holding it can be released.
 class SettingsDialogWindow : public juce::DialogWindow {
@@ -84,6 +110,40 @@ public:
     std::function<void()> onClose;
     void closeButtonPressed() override { if (onClose) onClose(); }
 };
+
+const juce::Colour kSectionOffText { 0xff5c636d };
+constexpr float kSectionDisabledAlpha = 0.42f;
+constexpr float kSectionDisabledLabelAlpha = 0.45f;
+
+void applyEncoderSectionStyle(bool active,
+                              juce::Label* caption,
+                              std::initializer_list<juce::Label*> labels,
+                              std::initializer_list<juce::Slider*> sliders,
+                              const juce::Label& referenceLabel,
+                              const juce::Slider& referenceSlider) {
+    const auto activeLabelCol = referenceLabel.findColour(juce::Label::textColourId);
+    const auto activeValueTextCol = referenceSlider.findColour(juce::Slider::textBoxTextColourId);
+    const auto activeValueBgCol = referenceSlider.findColour(juce::Slider::textBoxBackgroundColourId);
+    const auto activeValueOutlineCol = referenceSlider.findColour(juce::Slider::textBoxOutlineColourId);
+
+    if (caption != nullptr) {
+        caption->setColour(juce::Label::textColourId, active ? activeLabelCol : kSectionOffText);
+        caption->setAlpha(active ? 1.0f : kSectionDisabledLabelAlpha);
+    }
+    for (auto* label : labels) {
+        label->setColour(juce::Label::textColourId, active ? activeLabelCol : kSectionOffText);
+        label->setAlpha(active ? 1.0f : kSectionDisabledLabelAlpha);
+    }
+    for (auto* slider : sliders) {
+        slider->setAlpha(active ? 1.0f : kSectionDisabledAlpha);
+        slider->setColour(juce::Slider::textBoxTextColourId,
+                          active ? activeValueTextCol : activeValueTextCol.withMultipliedAlpha(0.38f));
+        slider->setColour(juce::Slider::textBoxBackgroundColourId,
+                          active ? activeValueBgCol : activeValueBgCol.withMultipliedAlpha(0.45f));
+        slider->setColour(juce::Slider::textBoxOutlineColourId,
+                          active ? activeValueOutlineCol : activeValueOutlineCol.withMultipliedAlpha(0.35f));
+    }
+}
 }
 
 void MainComponent::EncoderLookAndFeel::drawRotarySlider(
@@ -101,18 +161,19 @@ void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     juce::Path inactiveArc;
     inactiveArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
                               rotaryStartAngle, rotaryEndAngle, true);
-    g.setColour(green.withAlpha(slider.isEnabled() ? 0.24f : 0.12f));
+    const bool enabled = slider.isEnabled();
+    g.setColour(green.withAlpha(enabled ? 0.24f : 0.08f));
     g.strokePath(inactiveArc, stroke);
 
     juce::Path activeArc;
     activeArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
                             rotaryStartAngle, angle, true);
-    g.setColour(green.withAlpha(slider.isEnabled() ? 0.95f : 0.38f));
+    g.setColour(green.withAlpha(enabled ? 0.95f : 0.18f));
     g.strokePath(activeArc, stroke);
 
     g.setColour(juce::Colour(0xff15181d));
     g.fillEllipse(bounds.withSizeKeepingCentre(radius * 1.5f, radius * 1.5f));
-    g.setColour(juce::Colours::white.withAlpha(slider.isEnabled() ? 0.14f : 0.07f));
+    g.setColour(juce::Colours::white.withAlpha(enabled ? 0.14f : 0.05f));
     g.drawEllipse(bounds.withSizeKeepingCentre(radius * 1.5f, radius * 1.5f), 1.0f);
 
     const auto markerRadius = 4.5f;
@@ -120,12 +181,18 @@ void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     const auto marker = juce::Point<float>(
         centre.x + std::cos(angle - juce::MathConstants<float>::halfPi) * markerDistance,
         centre.y + std::sin(angle - juce::MathConstants<float>::halfPi) * markerDistance);
-    g.setColour(juce::Colour(0xffeaffed));
+    g.setColour(juce::Colour(0xffeaffed).withAlpha(enabled ? 1.0f : 0.22f));
     g.fillEllipse(marker.x - markerRadius, marker.y - markerRadius,
                   markerRadius * 2.0f, markerRadius * 2.0f);
-    g.setColour(green);
+    g.setColour(green.withAlpha(enabled ? 1.0f : 0.22f));
     g.drawEllipse(marker.x - markerRadius, marker.y - markerRadius,
                   markerRadius * 2.0f, markerRadius * 2.0f, 1.4f);
+}
+
+juce::Font MainComponent::EncoderLookAndFeel::getSliderPopupFont(juce::Slider& slider) {
+    if (compactSliders_.count(&slider) > 0)
+        return juce::Font(juce::FontOptions(10.0f));
+    return juce::LookAndFeel_V4::getSliderPopupFont(slider);
 }
 
 MainComponent::MainComponent() {
@@ -163,8 +230,10 @@ MainComponent::MainComponent() {
 
     addAndMakeVisible(dropArea_);
     dropArea_.onFile = [this](const juce::File& f) {
-        if (maybeSaveBeforeReplacingSession())
-            loadFile(f);
+        maybeSaveBeforeReplacingSession([this, f](bool proceed) {
+            if (proceed)
+                loadFile(f);
+        });
     };
 
     addAndMakeVisible(spectrumView_);
@@ -265,6 +334,7 @@ MainComponent::MainComponent() {
     musicMuteButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb24a4a));
     musicMuteButton_.onClick = [this] {
         player_.setMusicMuted(musicMuteButton_.getToggleState());
+        updateMusicMuteUi();
     };
     addAndMakeVisible(musicMuteButton_);
 
@@ -326,15 +396,16 @@ MainComponent::MainComponent() {
     duckCaption_.setText("Ducking", juce::dontSendNotification);
     addAndMakeVisible(duckCaption_);
 
-    // Mirror of the Mute button on the ducking side: bypasses the sidechain
-    // ducker so the music keeps its full level.
-    duckBypassButton_.setClickingTogglesState(true);
-    duckBypassButton_.setTooltip("Bypass ducking (music at full level)");
-    duckBypassButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb24a4a));
-    duckBypassButton_.onClick = [this] {
-        player_.setDuckBypassed(duckBypassButton_.getToggleState());
+    // Ducking on/off: off by default; when off controls gray out and the duck
+    // curve hides, but the monitor and knobs stay in the layout.
+    duckOnOffButton_.setClickingTogglesState(true);
+    duckOnOffButton_.setToggleState(false, juce::dontSendNotification);
+    duckOnOffButton_.setTooltip("Enable background ducking");
+    duckOnOffButton_.onClick = [this] {
+        updateDuckingUi();
+        markProjectDirty();
     };
-    addAndMakeVisible(duckBypassButton_);
+    addAndMakeVisible(duckOnOffButton_);
 
     duckLookAheadLabel_.setText("Look-ahead", juce::dontSendNotification);
     duckReductionLabel_.setText("Reduction", juce::dontSendNotification);
@@ -361,17 +432,21 @@ MainComponent::MainComponent() {
     player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0);
 
     // The backing-music section is busy, so its encoders are made narrower than
-    // the main ones: smaller labels and tighter value boxes to claw back width.
+    // the main ones: smaller label/value fonts and tighter value boxes.
     for (auto* label : { &musicMasterVolumeLabel_, &musicVolumeLabel_,
                          &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ }) {
-        label->setFont(juce::Font(juce::FontOptions(12.0f)));
+        label->setFont(juce::Font(juce::FontOptions(10.0f)));
         label->setJustificationType(juce::Justification::centred);
     }
     for (auto* slider : { &musicMasterVolumeSlider_, &musicVolumeSlider_,
-                          &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
-        slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 66, 20);
+                          &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ }) {
+        encoderLookAndFeel_.markCompact(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 66, 18);
+    }
 
     addAndMakeVisible(duckView_);
+    updateMusicMuteUi();
+    updateDuckingUi();
 
     // Start, fade in and fade out are now adjusted on the timeline; these
     // controls stay as hidden mirrors of the selected clip's values.
@@ -582,19 +657,19 @@ void MainComponent::syncMusicControlsFromSelection() {
     const bool valid = index >= 0 && index < static_cast<int>(clips.size());
     removeMusicButton_.setEnabled(!busy_.load() && valid);
     musicClipBox_.setEnabled(!busy_.load() && !clips.empty());
-    musicMasterVolumeSlider_.setEnabled(!busy_.load() && !clips.empty());
-    for (auto* s : { &musicStartSlider_, &musicVolumeSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
-        s->setEnabled(!busy_.load() && valid);
     musicMasterVolumeSlider_.setValue(engine_.musicMasterGainDb(), juce::dontSendNotification);
 
-    if (!valid)
+    if (!valid) {
+        updateMusicMuteUi();
         return;
+    }
 
     const auto& clip = clips[static_cast<std::size_t>(index)];
     musicStartSlider_.setValue(clip.startSeconds, juce::dontSendNotification);
     musicVolumeSlider_.setValue(clip.gainDb, juce::dontSendNotification);
     musicFadeInSlider_.setValue(clip.fadeInSeconds, juce::dontSendNotification);
     musicFadeOutSlider_.setValue(clip.fadeOutSeconds, juce::dontSendNotification);
+    updateMusicMuteUi();
 }
 
 void MainComponent::applySelectedMusicClipControls() {
@@ -945,6 +1020,9 @@ juce::var MainComponent::makeProjectState() const {
     root->setProperty("schemaVersion", 1);
     root->setProperty("sourcePath", engine_.sourceFile().getFullPathName());
     root->setProperty("projectPath", currentProjectFile_.getFullPathName());
+    const auto analysis = engine_.makeAnalysisCacheState();
+    if (analysis.getDynamicObject() != nullptr)
+        root->setProperty("analysisCache", analysis);
 
     auto controls = std::make_unique<juce::DynamicObject>();
     addNumber(*controls, "tone", toneSlider_.getValue());
@@ -961,6 +1039,7 @@ juce::var MainComponent::makeProjectState() const {
     addNumber(*controls, "deEssRatio", deEssRatioSlider_.getValue());
     addNumber(*controls, "deEssRange", deEssRangeSlider_.getValue());
     addNumber(*controls, "musicMasterGain", musicMasterVolumeSlider_.getValue());
+    addNumber(*controls, "duckEnabled", duckOnOffButton_.getToggleState() ? 1.0 : 0.0);
     addNumber(*controls, "duckLookAhead", duckLookAheadSlider_.getValue());
     addNumber(*controls, "duckReduction", duckReductionSlider_.getValue());
     addNumber(*controls, "duckBlend", duckFilterSlider_.getValue());
@@ -979,6 +1058,14 @@ juce::var MainComponent::makeProjectState() const {
         addNumber(*clipObj, "gainDb", clip.gainDb);
         addNumber(*clipObj, "fadeInSeconds", clip.fadeInSeconds);
         addNumber(*clipObj, "fadeOutSeconds", clip.fadeOutSeconds);
+        if (!clip.waveformPeaks.empty()) {
+            juce::Array<juce::var> waveform;
+            waveform.ensureStorageAllocated(static_cast<int>(clip.waveformPeaks.size()));
+            for (float peak : clip.waveformPeaks)
+                waveform.add(static_cast<double>(peak));
+            clipObj->setProperty("waveformPeaks", waveform);
+            addNumber(*clipObj, "waveformProcessedColumns", clip.waveformProcessedColumns);
+        }
         musicClips.add(juce::var(clipObj.release()));
     }
     root->setProperty("musicClips", musicClips);
@@ -994,6 +1081,7 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
         return false;
 
     auto* controls = root->getProperty("controls").getDynamicObject();
+    pendingProjectAnalysisCache_ = root->getProperty("analysisCache");
 
     player_.stop();
     player_.clearSources();
@@ -1031,6 +1119,12 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
     player_.setDuckLookAheadMs(duckLookAheadSlider_.getValue());
     player_.setDuckReductionDb(duckReductionSlider_.getValue());
     player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0);
+    if (controls != nullptr && controls->hasProperty("duckEnabled"))
+        duckOnOffButton_.setToggleState(numberProperty(controls, "duckEnabled", 0.0) > 0.5,
+                                        juce::dontSendNotification);
+    else
+        duckOnOffButton_.setToggleState(false, juce::dontSendNotification);
+    updateDuckingUi();
 
     pendingMusicClipRestore_.clear();
     pendingSelectedMusicClipRestore_ = static_cast<int>(numberProperty(root, "selectedMusicClip", -1.0));
@@ -1050,6 +1144,9 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
             clip.gainDb = numberProperty(clipObj, "gainDb", clip.gainDb);
             clip.fadeInSeconds = numberProperty(clipObj, "fadeInSeconds", clip.fadeInSeconds);
             clip.fadeOutSeconds = numberProperty(clipObj, "fadeOutSeconds", clip.fadeOutSeconds);
+            clip.waveformPeaks = floatVectorProperty(clipObj, "waveformPeaks");
+            clip.waveformProcessedColumns = static_cast<int>(numberProperty(clipObj, "waveformProcessedColumns",
+                                                                            static_cast<double>(clip.waveformPeaks.size())));
             pendingMusicClipRestore_.push_back(std::move(clip));
         }
     }
@@ -1064,11 +1161,13 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
             restoringProject_ = false;
             pendingMusicClipRestore_.clear();
             pendingSelectedMusicClipRestore_ = -1;
+            pendingProjectAnalysisCache_ = juce::var();
         }
     } else {
         restoringProject_ = false;
         pendingMusicClipRestore_.clear();
         pendingSelectedMusicClipRestore_ = -1;
+        pendingProjectAnalysisCache_ = juce::var();
         setUiBusy(false, "Project opened.");
     }
 
@@ -1086,30 +1185,64 @@ bool MainComponent::hasProjectContent() const {
     return engine_.hasAudio() || !engine_.musicClips().empty();
 }
 
-bool MainComponent::maybeSaveBeforeReplacingSession() {
+void MainComponent::maybeSaveBeforeReplacingSession(std::function<void(bool proceed)> onDone) {
     // Prompt whenever there is real work that isn't safely stored in a named
     // project file: either it changed since the last save (dirty), or it has
     // never been saved to a .vcproj at all (only sitting in the autosave).
     const bool unsaved = projectDirty_ || currentProjectFile_ == juce::File();
-    if (!unsaved || !hasProjectContent())
-        return true;
-    const int result = juce::AlertWindow::showYesNoCancelBox(
+    if (!unsaved || !hasProjectContent()) {
+        if (onDone)
+            onDone(true);
+        return;
+    }
+    juce::AlertWindow::showYesNoCancelBox(
         juce::AlertWindow::QuestionIcon,
         "Save current project?",
         "Do you want to save the current session before starting a new one?",
-        "Save", "Don't Save", "Cancel", this, nullptr);
-    if (result == 0)
-        return false;
-    if (result == 1) {
-        if (currentProjectFile_ == juce::File()) {
-            saveAsNewProject();
-            return false;
-        }
-        saveAutosaveSession();
-        projectDirty_ = false;
-        return true;
-    }
-    return true;
+        "Save", "Don't Save", "Cancel", this,
+        juce::ModalCallbackFunction::create([this, done = std::move(onDone)](int result) {
+            if (result == 0) {
+                if (done)
+                    done(false);
+                return;
+            }
+            if (result == 1) {
+                if (currentProjectFile_ == juce::File()) {
+                    saveAsNewProject([done](bool saved) {
+                        if (done)
+                            done(saved);
+                    });
+                    return;
+                }
+                saveAutosaveSession();
+                saveAnalysisFileForCurrentMedia();
+                projectDirty_ = false;
+                if (done)
+                    done(true);
+                return;
+            }
+            if (currentProjectFile_ == juce::File() && engine_.hasAudio()) {
+                juce::AlertWindow::showYesNoCancelBox(
+                    juce::AlertWindow::QuestionIcon,
+                    "Save analysis file?",
+                    "Save the analysis data for this media? It will open faster next time.",
+                    "Save Analysis", "Skip", "Cancel", this,
+                    juce::ModalCallbackFunction::create([this, done](int analysisResult) {
+                        if (analysisResult == 0) {
+                            if (done)
+                                done(false);
+                            return;
+                        }
+                        if (analysisResult == 1)
+                            saveAnalysisFileForCurrentMedia();
+                        if (done)
+                            done(true);
+                    }));
+                return;
+            }
+            if (done)
+                done(true);
+        }));
 }
 
 void MainComponent::clearProject() {
@@ -1118,6 +1251,7 @@ void MainComponent::clearProject() {
     engine_.clear();
     pendingMusicClipRestore_.clear();
     pendingSelectedMusicClipRestore_ = -1;
+    pendingProjectAnalysisCache_ = juce::var();
     currentProjectFile_ = juce::File();
     projectDirty_ = false;
     autosaveCountdown_ = 0;
@@ -1143,40 +1277,58 @@ void MainComponent::clearProject() {
 }
 
 void MainComponent::newProject() {
-    if (!maybeSaveBeforeReplacingSession())
-        return;
-    promptForProjectName("New Project", "Untitled", [this](juce::String name) {
-        clearProject();
-        currentProjectFile_ = uniqueProjectFile(projectsFolder(), name);
-        saveAutosaveSession(); // writes the new (empty) project file
-        updateMainMenu();
-        statusLabel_.setText("Created project: " + currentProjectFile_.getFileNameWithoutExtension(),
-                             juce::dontSendNotification);
+    maybeSaveBeforeReplacingSession([this](bool proceed) {
+        if (!proceed)
+            return;
+        promptForProjectName("New Project", "Untitled", [this](juce::String name) {
+            clearProject();
+            currentProjectFile_ = uniqueProjectFile(projectsFolder(), name);
+            saveAutosaveSession(); // writes the new (empty) project file
+            updateMainMenu();
+            statusLabel_.setText("Created project: " + currentProjectFile_.getFileNameWithoutExtension(),
+                                 juce::dontSendNotification);
+        });
     });
 }
 
 void MainComponent::promptForProjectName(const juce::String& title, const juce::String& defaultName,
-                                         std::function<void(juce::String)> onName) {
+                                         std::function<void(juce::String)> onName,
+                                         std::function<void()> onCancel) {
     auto aw = std::make_shared<juce::AlertWindow>(title, "Project name:",
                                                   juce::AlertWindow::NoIcon, this);
     aw->addTextEditor("name", defaultName);
     aw->addButton("OK", 1, juce::KeyPress(juce::KeyPress::returnKey));
     aw->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
     aw->enterModalState(true,
-        juce::ModalCallbackFunction::create([aw, cb = std::move(onName)](int result) {
+        juce::ModalCallbackFunction::create([aw, cb = std::move(onName),
+                                             cancel = std::move(onCancel)](int result) {
             const auto entered = aw->getTextEditorContents("name").trim();
             aw->exitModalState(result);
             aw->setVisible(false);
             if (result == 1 && cb)
                 cb(entered.isNotEmpty() ? entered : "Untitled");
+            else if (result != 1 && cancel)
+                cancel();
         }), false);
 }
 
 void MainComponent::openProjectManager() {
     auto content = std::make_unique<ProjectManagerComponent>(projectsFolder(), currentProjectFile_);
     auto* pm = content.get();
-    pm->onNew = [this] { closeProjectManager(); newProject(); };
-    pm->onOpen = [this](juce::File f) { closeProjectManager(); openProjectFile(f); };
+    pm->onNew = [this] {
+        closeProjectManager();
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
+            if (safe != nullptr)
+                safe->newProject();
+        });
+    };
+    pm->onOpen = [this](juce::File f) {
+        closeProjectManager();
+        juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this), f] {
+            if (safe != nullptr)
+                safe->openProjectFile(f);
+        });
+    };
     pm->onDelete = [this, pm](juce::File f) {
         deleteProjectFile(f);
         pm->setCurrent(currentProjectFile_);
@@ -1206,13 +1358,15 @@ void MainComponent::closeProjectManager() {
 void MainComponent::openProjectFile(const juce::File& file) {
     if (!file.existsAsFile())
         return;
-    if (!maybeSaveBeforeReplacingSession())
-        return;
-    juce::var parsed;
-    juce::JSON::parse(file.loadFileAsString(), parsed);
-    currentProjectFile_ = file;
-    if (!applyProjectState(parsed, false))
-        statusLabel_.setText("Could not open project.", juce::dontSendNotification);
+    maybeSaveBeforeReplacingSession([this, file](bool proceed) {
+        if (!proceed)
+            return;
+        juce::var parsed;
+        juce::JSON::parse(file.loadFileAsString(), parsed);
+        currentProjectFile_ = file;
+        if (!applyProjectState(parsed, false))
+            statusLabel_.setText("Could not open project.", juce::dontSendNotification);
+    });
 }
 
 void MainComponent::deleteProjectFile(const juce::File& file) {
@@ -1230,23 +1384,32 @@ void MainComponent::saveCurrentProject() {
         return;
     }
     saveAutosaveSession();
+    saveAnalysisFileForCurrentMedia();
     projectDirty_ = false;
     autosaveCountdown_ = 0;
     statusLabel_.setText("Saved: " + currentProjectFile_.getFileNameWithoutExtension(),
                          juce::dontSendNotification);
 }
 
-void MainComponent::saveAsNewProject() {
+void MainComponent::saveAsNewProject(std::function<void(bool saved)> onComplete) {
     // Save the current editor content (not cleared) into a freshly named project.
-    promptForProjectName("Save Project", "Untitled", [this](juce::String name) {
-        currentProjectFile_ = uniqueProjectFile(projectsFolder(), name);
-        saveAutosaveSession();
-        projectDirty_ = false;
-        autosaveCountdown_ = 0;
-        updateMainMenu();
-        statusLabel_.setText("Saved: " + currentProjectFile_.getFileNameWithoutExtension(),
-                             juce::dontSendNotification);
-    });
+    promptForProjectName("Save Project", "Untitled",
+        [this, onComplete](juce::String name) {
+            currentProjectFile_ = uniqueProjectFile(projectsFolder(), name);
+            saveAutosaveSession();
+            saveAnalysisFileForCurrentMedia();
+            projectDirty_ = false;
+            autosaveCountdown_ = 0;
+            updateMainMenu();
+            statusLabel_.setText("Saved: " + currentProjectFile_.getFileNameWithoutExtension(),
+                                 juce::dontSendNotification);
+            if (onComplete)
+                onComplete(true);
+        },
+        [onComplete] {
+            if (onComplete)
+                onComplete(false);
+        });
 }
 
 void MainComponent::markProjectDirty() {
@@ -1264,6 +1427,10 @@ void MainComponent::saveAutosaveSession() {
     // never has to think about saving.
     if (currentProjectFile_ != juce::File())
         currentProjectFile_.replaceWithText(state);
+}
+
+void MainComponent::saveAnalysisFileForCurrentMedia() {
+    engine_.saveAnalysisCacheNow();
 }
 
 void MainComponent::restoreAutosaveSession() {
@@ -1486,6 +1653,8 @@ void MainComponent::restorePendingMusicClipsAfterVoiceLoad(const juce::File& voi
                 engine_.setMusicClipParams(index, saved.startSeconds, saved.sourceOffsetSeconds,
                                            saved.gainDb, saved.fadeInSeconds, saved.fadeOutSeconds,
                                            saved.lengthSeconds);
+                engine_.setMusicClipWaveformPeaks(index, saved.waveformPeaks,
+                                                  saved.waveformProcessedColumns);
             }
 
             return {};
@@ -1523,6 +1692,8 @@ void MainComponent::loadFile(const juce::File& file) {
     analyzingMedia_ = true;
     dropArea_.setStatus("Analyzing " + file.getFileName() + "\nMeasuring level and voice profile");
     const auto params = buildParams();
+    engine_.setProjectAnalysisCache(pendingProjectAnalysisCache_);
+    pendingProjectAnalysisCache_ = juce::var();
 
     runOnWorker(
         "Loading + analysing audio...",
@@ -1719,6 +1890,63 @@ void MainComponent::updateListenButton() {
     listenButton_.setColour(juce::TextButton::buttonOnColourId, col);
 }
 
+void MainComponent::updateDuckingUi() {
+    const bool on = duckOnOffButton_.getToggleState();
+    duckOnOffButton_.setButtonText(on ? "On" : "Off");
+    player_.setDuckBypassed(!on);
+
+    const auto offGrey = juce::Colour(0xff3a3f48);
+    const auto onGreen = juce::Colour(0xff6ee07a);
+    duckOnOffButton_.setColour(juce::TextButton::buttonColourId, offGrey);
+    duckOnOffButton_.setColour(juce::TextButton::buttonOnColourId, on ? onGreen : offGrey);
+    duckOnOffButton_.setColour(juce::TextButton::textColourOffId, on ? juce::Colours::white : kSectionOffText);
+    duckOnOffButton_.setColour(juce::TextButton::textColourOnId, juce::Colour(0xff101217));
+
+    for (auto* label : { &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ })
+        label->setEnabled(on);
+    for (auto* slider : { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
+        slider->setEnabled(on);
+
+    applyEncoderSectionStyle(on,
+                             &duckCaption_,
+                             { &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ },
+                             { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ },
+                             musicCaption_,
+                             musicMasterVolumeSlider_);
+
+    duckView_.setDuckingEnabled(on);
+}
+
+void MainComponent::updateMusicMuteUi() {
+    const bool muted = musicMuteButton_.getToggleState();
+    const int index = musicClipBox_.getSelectedId() - 1;
+    const auto& clips = engine_.musicClips();
+    const bool validClip = index >= 0 && index < static_cast<int>(clips.size());
+    const bool busy = busy_.load();
+    const bool hasClips = !clips.empty();
+
+    const bool masterActive = !busy && hasClips && !muted;
+    const bool clipActive = !busy && validClip && !muted;
+
+    musicMasterVolumeSlider_.setEnabled(masterActive);
+    musicVolumeSlider_.setEnabled(clipActive);
+    for (auto* s : { &musicStartSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
+        s->setEnabled(!busy && validClip);
+
+    applyEncoderSectionStyle(!muted && hasClips,
+                             &musicCaption_,
+                             { &musicMasterVolumeLabel_ },
+                             { &musicMasterVolumeSlider_ },
+                             musicCaption_,
+                             musicMasterVolumeSlider_);
+    applyEncoderSectionStyle(clipActive,
+                             nullptr,
+                             { &musicVolumeLabel_ },
+                             { &musicVolumeSlider_ },
+                             musicCaption_,
+                             musicMasterVolumeSlider_);
+}
+
 void MainComponent::setUiBusy(bool busy, const juce::String& message) {
     progressBar_.setVisible(busy);
     progress_ = busy ? -1.0 : 0.0; // negative -> indeterminate animation
@@ -1754,15 +1982,18 @@ void MainComponent::timerCallback() {
     vuMeter_.setLevels(playing ? player_.rmsLevelDb() : -60.0f,
                        playing ? player_.peakLevelDb() : -60.0f);
 
-    // Music-output / duck display.
+    // Music-output monitor always runs; the duck curve only draws when enabled.
+    const bool duckingOn = duckOnOffButton_.getToggleState();
     std::array<float, 512> musicWave;
     if (playing)
         player_.readMusicAnalysisBlock(musicWave.data(), static_cast<int>(musicWave.size()));
     else
         musicWave.fill(0.0f);
     duckView_.setMusicWaveform(musicWave.data(), static_cast<int>(musicWave.size()));
-    duckView_.setDuckState(playing ? player_.musicDuckReductionDb() : 0.0f,
-                           static_cast<float>(duckFilterSlider_.getValue() / 100.0));
+    duckView_.setDuckingEnabled(duckingOn);
+    if (duckingOn)
+        duckView_.setDuckState(playing ? player_.musicDuckReductionDb() : 0.0f,
+                               static_cast<float>(duckFilterSlider_.getValue() / 100.0));
     if (playing)
         updateMusicSpectrum();
     else
@@ -1817,14 +2048,14 @@ void MainComponent::resized() {
     auto r = getLocalBounds().reduced(16);
 
     // Live gain-reduction meters.
-    compMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    deEssMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    limiterMeter_.setBounds(r.removeFromTop(20));
-    r.removeFromTop(2);
-    vuMeter_.setBounds(r.removeFromTop(24));
-    r.removeFromTop(6);
+    compMeter_.setBounds(r.removeFromTop(kGrMeterRowHeight));
+    r.removeFromTop(kMeterRowGap);
+    deEssMeter_.setBounds(r.removeFromTop(kGrMeterRowHeight));
+    r.removeFromTop(kMeterRowGap);
+    limiterMeter_.setBounds(r.removeFromTop(kGrMeterRowHeight));
+    r.removeFromTop(kMeterRowGap);
+    vuMeter_.setBounds(r.removeFromTop(kOutputMeterRowHeight));
+    r.removeFromTop(kMetersBottomGap);
 
     auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider,
                            int labelHeight = 20) {
@@ -1866,14 +2097,13 @@ void MainComponent::resized() {
     r.removeFromTop(8);
 
     spectrumView_.setBounds(r.removeFromTop(kSpectrumHeight));
-    r.removeFromTop(6);
+    r.removeFromTop(kWaveformSectionGap);
 
-    auto timelineBounds = r.removeFromTop(216);
+    auto timelineBounds = r.removeFromTop(kTimelineHeight);
     musicTimeline_.setBounds(timelineBounds);
     // The voice drop field covers only the voice lane (top), leaving the music
-    // lane below clickable so its own "+" adds a music clip. Matches
-    // MusicTimeline's internal lane layout: reduced(10), 96px voice lane.
-    auto voiceLane = timelineBounds.reduced(10).removeFromTop(96);
+    // lane below clickable so its own "+" adds a music clip.
+    auto voiceLane = timelineBounds.removeFromTop(kVoiceLaneHeight);
     dropArea_.setBounds(voiceLane);
     dropArea_.setVisible(analyzingMedia_ || !engine_.hasAudio());
     dropArea_.toFront(false);
@@ -1890,7 +2120,7 @@ void MainComponent::resized() {
 
     auto leftCol = musicArea.removeFromLeft(knobWidth * 2);
     auto rightCol = musicArea.removeFromRight(knobWidth * 3);
-    auto screenCol = musicArea; // full-height middle column for the screen
+    auto screenCol = musicArea;
 
     // Left column: "Backing Music" + Mute on top, two volume knobs below.
     auto leftCaption = leftCol.removeFromTop(captionH);
@@ -1902,9 +2132,9 @@ void MainComponent::resized() {
     placeEncoder(leftCol.reduced(4, 0),
                  musicVolumeLabel_, musicVolumeSlider_, labelHeight);
 
-    // Right column: Bypass mirrors Mute on the far side; "Ducking" + 3 knobs.
+    // Right column: On/Off mirrors Mute; "Ducking" + 3 knobs.
     auto rightCaption = rightCol.removeFromTop(captionH);
-    duckBypassButton_.setBounds(rightCaption.removeFromRight(58).withSizeKeepingCentre(56, 18));
+    duckOnOffButton_.setBounds(rightCaption.removeFromRight(58).withSizeKeepingCentre(56, 18));
     rightCaption.removeFromRight(6);
     duckCaption_.setBounds(rightCaption);
     placeEncoder(rightCol.removeFromLeft(knobWidth).reduced(4, 0),
@@ -1914,7 +2144,6 @@ void MainComponent::resized() {
     placeEncoder(rightCol.reduced(4, 0),
                  duckFilterLabel_, duckFilterSlider_, labelHeight);
 
-    // Middle column: the screen spans the full section height.
     duckView_.setBounds(screenCol.reduced(8, 4));
     r.removeFromTop(8);
 
