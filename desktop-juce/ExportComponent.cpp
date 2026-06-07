@@ -13,11 +13,16 @@ ExportComponent::ExportComponent(const juce::File& sourceFile, bool sourceHasVid
     formats_.push_back({ "FLAC (lossless)", "flac", false });
     formats_.push_back({ "Opus", "opus", false });
 
-    // Default selection: video source -> the MP4 item; audio source -> the item
-    // matching the source's own extension, else WAV.
+    // The "keep original" target: same container/extension as the source, and
+    // for a video source mux the processed audio back into the original video.
+    const auto srcExt = sourceFile_.getFileExtension().removeCharacters(".").toLowerCase();
+    originalFormat_ = { "Original (" + srcExt.toUpperCase() + ")", srcExt, sourceHasVideo };
+
+    // Default combo selection (only used in "choose format" mode): video source
+    // -> the MP4 item; audio source -> the item matching the source's own
+    // extension, else WAV.
     int defaultIndex = 0;
     if (!sourceHasVideo) {
-        const auto srcExt = sourceFile_.getFileExtension().removeCharacters(".").toLowerCase();
         for (int i = 0; i < (int) formats_.size(); ++i) {
             if (formats_[(size_t) i].extension == srcExt) {
                 defaultIndex = i;
@@ -25,6 +30,15 @@ ExportComponent::ExportComponent(const juce::File& sourceFile, bool sourceHasVid
             }
         }
     }
+
+    // Mode radio buttons: keep original (default) vs. choose a format.
+    keepOriginalButton_.setRadioGroupId(1);
+    chooseFormatButton_.setRadioGroupId(1);
+    keepOriginalButton_.setToggleState(true, juce::dontSendNotification);
+    keepOriginalButton_.onClick = [this] { modeChanged(); };
+    chooseFormatButton_.onClick = [this] { modeChanged(); };
+    addAndMakeVisible(keepOriginalButton_);
+    addAndMakeVisible(chooseFormatButton_);
 
     formatLabel_.setJustificationType(juce::Justification::centredLeft);
     pathLabel_.setJustificationType(juce::Justification::centredLeft);
@@ -34,7 +48,8 @@ ExportComponent::ExportComponent(const juce::File& sourceFile, bool sourceHasVid
     for (int i = 0; i < (int) formats_.size(); ++i)
         formatBox_.addItem(formats_[(size_t) i].label, i + 1);
     formatBox_.setSelectedItemIndex(defaultIndex, juce::dontSendNotification);
-    formatBox_.onChange = [this] { formatChanged(); };
+    formatBox_.onChange = [this] { syncPathExtension(); };
+    formatBox_.setEnabled(false); // disabled until "choose format" is selected
     addAndMakeVisible(formatBox_);
 
     pathEditor_.setMultiLine(false);
@@ -55,7 +70,7 @@ ExportComponent::ExportComponent(const juce::File& sourceFile, bool sourceHasVid
     exportButton_.onClick = [this] {
         const juce::File out(pathEditor_.getText());
         if (out == juce::File()) return;
-        const bool mux = selectedFormat().muxVideo;
+        const bool mux = resolvedFormat().muxVideo;
         auto cb = onExport;
         closeDialog();
         if (cb) cb(out, mux);
@@ -65,7 +80,7 @@ ExportComponent::ExportComponent(const juce::File& sourceFile, bool sourceHasVid
     // Seed the destination path from the source folder and current format.
     const auto dir = sourceFile_.getParentDirectory();
     const auto base = sourceFile_.getFileNameWithoutExtension() + "_enhanced";
-    pathEditor_.setText(dir.getChildFile(base + "." + selectedFormat().extension).getFullPathName(),
+    pathEditor_.setText(dir.getChildFile(base + "." + resolvedFormat().extension).getFullPathName(),
                         juce::dontSendNotification);
 
     setSize(kWidth, kHeight);
@@ -76,16 +91,25 @@ const ExportComponent::FormatOption& ExportComponent::selectedFormat() const {
     return formats_[(size_t) i];
 }
 
-void ExportComponent::formatChanged() {
+const ExportComponent::FormatOption& ExportComponent::resolvedFormat() const {
+    return keepOriginalButton_.getToggleState() ? originalFormat_ : selectedFormat();
+}
+
+void ExportComponent::modeChanged() {
+    formatBox_.setEnabled(chooseFormatButton_.getToggleState());
+    syncPathExtension();
+}
+
+void ExportComponent::syncPathExtension() {
     const juce::File current(pathEditor_.getText());
     if (current == juce::File()) return;
-    pathEditor_.setText(current.withFileExtension(selectedFormat().extension).getFullPathName(),
+    pathEditor_.setText(current.withFileExtension(resolvedFormat().extension).getFullPathName(),
                         juce::dontSendNotification);
 }
 
 void ExportComponent::browse() {
     const juce::File current(pathEditor_.getText());
-    const auto ext = selectedFormat().extension;
+    const auto ext = resolvedFormat().extension;
     chooser_ = std::make_unique<juce::FileChooser>("Export to", current, "*." + ext);
     chooser_->launchAsync(
         juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles,
@@ -104,6 +128,12 @@ void ExportComponent::closeDialog() {
 
 void ExportComponent::resized() {
     auto area = getLocalBounds().reduced(16);
+
+    auto modeRow = area.removeFromTop(26);
+    keepOriginalButton_.setBounds(modeRow.removeFromLeft(200));
+    chooseFormatButton_.setBounds(modeRow);
+
+    area.removeFromTop(10);
 
     auto formatRow = area.removeFromTop(26);
     formatLabel_.setBounds(formatRow.removeFromLeft(70));

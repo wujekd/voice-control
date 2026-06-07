@@ -25,6 +25,10 @@ void SettingsComponent::setAudioControls(juce::ToggleButton& followSystem,
         outputLabel.setBounds(devRow.removeFromLeft(100));
         outputBox.setBounds(devRow);
     };
+
+    // The page already has its bounds (set when added to the tabs); lay the
+    // controls out now that the layout callback exists.
+    audioPage_.resized();
 }
 
 void SettingsComponent::setProControls(std::vector<ProPair> pairs, juce::Button& resetButton) {
@@ -54,6 +58,8 @@ void SettingsComponent::setProControls(std::vector<ProPair> pairs, juce::Button&
 
         resetButton.setBounds(r.removeFromBottom(28).removeFromRight(90));
     };
+
+    proPage_.resized();
 }
 
 void SettingsComponent::resized() {

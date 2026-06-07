@@ -6,10 +6,11 @@
 #include <memory>
 #include <vector>
 
-// Modal export dialog body. Lets the user pick an output format (the source's
-// native video, or an audio format to transcode to) and a destination path,
-// then reports the resolved file plus whether to mux back into the source video
-// via onExport. Does no encoding itself — MainComponent runs the offline render.
+// Modal export dialog body. Defaults to "keep original format" — exporting in
+// the source's own format/container. The user can switch to "choose format" to
+// pick an audio target (or the source's native video). Reports the resolved
+// file plus whether to mux back into the source video via onExport. Does no
+// encoding itself — MainComponent runs the offline render.
 class ExportComponent : public juce::Component {
 public:
     ExportComponent(const juce::File& sourceFile, bool sourceHasVideo);
@@ -21,7 +22,7 @@ public:
 
     // Natural size; used to size the hosting DialogWindow.
     static constexpr int kWidth = 500;
-    static constexpr int kHeight = 184;
+    static constexpr int kHeight = 224;
 
 private:
     struct FormatOption {
@@ -31,13 +32,20 @@ private:
     };
 
     const FormatOption& selectedFormat() const;
-    void formatChanged();
+    // The format that will actually be written: the original when "keep
+    // original" is selected, otherwise the format chosen in the combo box.
+    const FormatOption& resolvedFormat() const;
+    void modeChanged();
+    void syncPathExtension();
     void browse();
     void closeDialog();
 
     std::vector<FormatOption> formats_;
+    FormatOption originalFormat_;
     juce::File sourceFile_;
 
+    juce::ToggleButton keepOriginalButton_ { "Keep original format" };
+    juce::ToggleButton chooseFormatButton_ { "Choose format" };
     juce::Label formatLabel_ { {}, "Format" };
     juce::ComboBox formatBox_;
     juce::Label pathLabel_ { {}, "Save to" };
