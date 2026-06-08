@@ -50,7 +50,13 @@ private:
         openProjectManagerMenuId = 2,
         saveProjectMenuId = 3,
         openSettingsMenuId = 20,
+        userGuideMenuId = 30,
+        keyboardShortcutsMenuId = 31,
+        aboutMenuId = 32,
     };
+
+    // How the background-music section behaves. Persisted as a global preference.
+    enum class MusicSectionMode { Foldable = 0, AlwaysOn = 1, AlwaysOff = 2 };
 
     struct MusicUndoState;
     struct PendingMusicClipRestore;
@@ -61,10 +67,13 @@ private:
                               float sliderPosProportional, float rotaryStartAngle,
                               float rotaryEndAngle, juce::Slider& slider) override;
         void markCompact(juce::Slider& slider) { compactSliders_.insert(&slider); }
+        void markSoftDisabled(juce::Slider& slider) { softDisabledSliders_.insert(&slider); }
         juce::Font getSliderPopupFont(juce::Slider& slider) override;
+        juce::Font getLabelFont(juce::Label& label) override;
 
     private:
         std::unordered_set<juce::Slider*> compactSliders_;
+        std::unordered_set<juce::Slider*> softDisabledSliders_;
     };
 
     void loadFile(const juce::File& file);
@@ -89,6 +98,18 @@ private:
     void updateListenButton();
     void updateDuckingUi();
     void updateMusicMuteUi();
+    // Fold the background-music section (timeline music lane + controls) in or
+    // out, resizing the host window to match.
+    void setMusicSectionExpanded(bool expanded);
+    // Apply the persisted MusicSectionMode preference to the current UI state.
+    void applyMusicSectionMode();
+    void setMusicSectionMode(MusicSectionMode mode);
+    void openHelp();
+    void closeHelp();
+    void showKeyboardShortcuts();
+    void showAbout();
+    void captureSectionChromeBaselines();
+    void restoreSectionSliderChrome(juce::Slider& slider) const;
     void updateEqView();
     void updateLiveSpectrum();
     void updateMusicSpectrum();
@@ -116,6 +137,7 @@ private:
     void restorePendingMusicClipsAfterVoiceLoad(const juce::File& voiceFile, const juce::String& loadedMessage);
     void openSettings();
     void closeSettings();
+    juce::String buildProjectInfoText() const;
     void updateMainMenu();
     double currentDeviceRate() const;
     double currentIntensity() const;
@@ -154,6 +176,10 @@ private:
     juce::ComboBox outputDeviceBox_;
     std::unique_ptr<juce::DialogWindow> projectManagerWindow_;
     std::unique_ptr<juce::DialogWindow> settingsWindow_;
+    std::unique_ptr<juce::DialogWindow> helpWindow_;
+    // Drives every setTooltip(...) in the UI; must outlive the controls.
+    juce::TooltipWindow tooltipWindow_;
+    juce::TextButton helpButton_ { "?" }; // opens the user guide
     bool followSystemDefault_ = true;
     bool updatingDevice_ = false; // re-entrancy guard for device changes
     EncoderLookAndFeel encoderLookAndFeel_;
@@ -169,6 +195,13 @@ private:
     juce::TextButton resetProButton_ { "Reset" };
     juce::TextButton playButton_ { "Play" };
     juce::TextButton listenButton_; // toggles Original vs Enhanced output
+    juce::TextButton musicSectionToggle_; // "Add background music" bar (collapsed)
+    juce::TextButton musicHideButton_ { "Hide" }; // header button (expanded)
+    bool musicSectionExpanded_ = false;
+    MusicSectionMode musicSectionMode_ = MusicSectionMode::Foldable;
+    // Preference control (re-parented into the settings window's General tab).
+    juce::Label musicSectionModeLabel_;
+    juce::ComboBox musicSectionModeBox_;
     juce::TextButton addMusicButton_ { "Add music..." };
     juce::TextButton removeMusicButton_ { "Remove" };
     juce::ComboBox musicClipBox_;
@@ -208,6 +241,11 @@ private:
     // Per-clip (fadeIn, fadeOut) captured at drag start, so overlap crossfades
     // can be reset when clips are pulled apart again.
     std::vector<std::pair<double, double>> musicClipFadeSnapshot_;
+    juce::Colour sectionActiveLabelColour_;
+    juce::Colour sectionActiveSliderTextColour_;
+    juce::Colour sectionActiveSliderBgColour_;
+    juce::Colour sectionActiveSliderOutlineColour_;
+    bool sectionChromeBaselinesCaptured_ = false;
     void applyMusicClipOverlapCrossfades(int draggedIndex);
     bool analyzingMedia_ = false;
     juce::TextButton exportButton_ { "Export" };

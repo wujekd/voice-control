@@ -73,14 +73,45 @@ void SpectrumView::paint(juce::Graphics& g) {
     g.drawHorizontalLine(static_cast<int>(midY), 0.0f, w);
 
     juce::Path eq;
-    bool started = false;
+    bool inPath = false;
+    float prevPx = 0.0f, prevY = 0.0f;
+    bool hadPrev = false;
+    const auto yVisible = [&](float y) {
+        return y >= plot.getY() && y <= plot.getBottom();
+    };
+    const auto clipToBoundary = [&](float x0, float y0, float x1, float y1) {
+        const float yBound = (y0 > plot.getBottom() || y1 > plot.getBottom())
+                                 ? plot.getBottom()
+                                 : plot.getY();
+        const float t = (yBound - y0) / (y1 - y0);
+        return juce::Point<float>(x0 + t * (x1 - x0), yBound);
+    };
     for (int px = 0; px <= (int) w; px += 2) {
         const float f = xToFreq((float) px, w);
         const float db = (float) eqResponseAt(f);
-        const float y = juce::jlimit(plot.getY(), plot.getBottom(),
-                                     midY - (db / kEqRangeDb) * (plot.getHeight() * 0.5f));
-        if (!started) { eq.startNewSubPath((float) px, y); started = true; }
-        else eq.lineTo((float) px, y);
+        const float x = (float) px;
+        const float y = midY - (db / kEqRangeDb) * (plot.getHeight() * 0.5f);
+        const bool visible = yVisible(y);
+
+        if (visible) {
+            if (!inPath) {
+                if (hadPrev && !yVisible(prevY))
+                    eq.startNewSubPath(clipToBoundary(prevPx, prevY, x, y));
+                else
+                    eq.startNewSubPath(x, y);
+                inPath = true;
+            } else {
+                eq.lineTo(x, y);
+            }
+        } else if (inPath && hadPrev && yVisible(prevY)) {
+            const auto p = clipToBoundary(prevPx, prevY, x, y);
+            eq.lineTo(p.x, p.y);
+            inPath = false;
+        }
+
+        prevPx = x;
+        prevY = y;
+        hadPrev = true;
     }
     g.setColour(juce::Colour(0xff6ee07a));
     g.strokePath(eq, juce::PathStrokeType(2.0f));

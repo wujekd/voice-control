@@ -60,10 +60,6 @@ public:
 
         drawWaveform(g, waveLane);
         drawDuckLine(g, lineLane);
-
-        g.setFont(juce::Font(juce::FontOptions(10.0f)));
-        g.setColour(juce::Colours::white.withAlpha(0.45f));
-        g.drawText("Music out", waveLane.toNearestInt(), juce::Justification::topLeft);
     }
 
 private:

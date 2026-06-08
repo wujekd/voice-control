@@ -26,6 +26,9 @@ public:
     // tracks what you hear as the slider moves.
     void setVoiceNoiseReduction(float amount01);
     void setClips(const std::vector<MusicClip>* clips, int selectedIndex);
+    // When false, only the voice lane is drawn/interactive and the component is
+    // expected to be sized to the voice lane alone (backing-music section folded).
+    void setMusicLaneVisible(bool visible);
     void setPlayheadSeconds(double seconds);
     bool tickAnimation();
 
@@ -80,4 +83,5 @@ private:
     float voiceWaveformTransition_ = 1.0f;
     float voiceWaveformGain_ = 1.0f; // maps raw peaks to the normalized (heard) level
     float voiceNoiseReduction_ = 0.0f; // 0 = dry, 1 = fully denoised
+    bool musicLaneVisible_ = true;
 };

@@ -22,20 +22,45 @@ constexpr int kMetersSectionHeight = kGrMeterRowHeight + kMeterRowGap
     + kGrMeterRowHeight + kMeterRowGap
     + kGrMeterRowHeight + kMeterRowGap
     + kOutputMeterRowHeight + kMetersBottomGap;
-constexpr int kDefaultWindowHeight = kOuterMargin * 2
+constexpr int kMusicToggleBarHeight = 26;            // "Add background music" bar
+constexpr int kMusicSlotWidth = 80;
+constexpr int kMusicSideColWidth = kMusicSlotWidth * 3; // three pot slots per side
+constexpr int kMusicControlsHeight = 116;            // background-music controls row
+
+// The background-music section folds away by default. Everything above it is
+// common to both states; only the bottom block differs.
+constexpr int kCommonWindowHeight = kOuterMargin * 2
     + kMetersSectionHeight                           // meters (matches resized())
     + (138 + 8)                                      // main controls
     + kSpectrumHeight + kWaveformSectionGap          // spectrum + gap to voice lane
-    + (kTimelineHeight + 8)                          // timeline
-    + (116 + 8)                                      // music controls
     + (18)                                           // progress
     + kBottomBreathingRoom;
+// Voice only: timeline shows the voice lane and nothing music-related at all
+// (the "Always off" preference).
+constexpr int kVoiceOnlyWindowHeight = kCommonWindowHeight
+    + (kVoiceLaneHeight + 8);
+// Collapsed: voice-lane-only timeline plus the slim disclosure bar.
+constexpr int kCollapsedWindowHeight = kVoiceOnlyWindowHeight
+    + (kMusicToggleBarHeight + 8);
+// Expanded: full timeline (voice + music lanes) and the controls row. The
+// disclosure bar disappears entirely — a small "Hide" button in the section
+// header takes over, so no vertical space is wasted on a full-width bar.
+constexpr int kExpandedWindowHeight = kCommonWindowHeight
+    + (kTimelineHeight + 8)
+    + (kMusicControlsHeight + 8);
 
 juce::File appDataDir() {
     auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
         .getChildFile("Voice Control");
     dir.createDirectory();
     return dir;
+}
+
+// App-wide, cross-session preferences (distinct from per-project state).
+juce::PropertiesFile& globalPrefs() {
+    static juce::PropertiesFile prefs(appDataDir().getChildFile("Preferences.settings"),
+                                      juce::PropertiesFile::Options{});
+    return prefs;
 }
 
 juce::File autosaveProjectFile() {
@@ -111,37 +136,41 @@ public:
     void closeButtonPressed() override { if (onClose) onClose(); }
 };
 
+// Scrollable body for the User Guide window; keeps the editor inset on resize.
+class HelpContent : public juce::Component {
+public:
+    void setBody(std::unique_ptr<juce::TextEditor> body) {
+        body_ = std::move(body);
+        addAndMakeVisible(*body_);
+        resized();
+    }
+    void resized() override {
+        if (body_ != nullptr)
+            body_->setBounds(getLocalBounds().reduced(12));
+    }
+private:
+    std::unique_ptr<juce::TextEditor> body_;
+};
+
 const juce::Colour kSectionOffText { 0xff5c636d };
-constexpr float kSectionDisabledAlpha = 0.42f;
+const juce::Colour kSectionOffTextReadable { 0xff9aa3ad };
 constexpr float kSectionDisabledLabelAlpha = 0.45f;
+constexpr float kSectionDisabledLabelAlphaSoft = 0.72f;
 
 void applyEncoderSectionStyle(bool active,
                               juce::Label* caption,
                               std::initializer_list<juce::Label*> labels,
-                              std::initializer_list<juce::Slider*> sliders,
-                              const juce::Label& referenceLabel,
-                              const juce::Slider& referenceSlider) {
-    const auto activeLabelCol = referenceLabel.findColour(juce::Label::textColourId);
-    const auto activeValueTextCol = referenceSlider.findColour(juce::Slider::textBoxTextColourId);
-    const auto activeValueBgCol = referenceSlider.findColour(juce::Slider::textBoxBackgroundColourId);
-    const auto activeValueOutlineCol = referenceSlider.findColour(juce::Slider::textBoxOutlineColourId);
-
+                              juce::Colour activeLabelCol,
+                              float inactiveAlpha = kSectionDisabledLabelAlpha) {
     if (caption != nullptr) {
-        caption->setColour(juce::Label::textColourId, active ? activeLabelCol : kSectionOffText);
-        caption->setAlpha(active ? 1.0f : kSectionDisabledLabelAlpha);
+        caption->setEnabled(true);
+        caption->setColour(juce::Label::textColourId, active ? activeLabelCol : kSectionOffTextReadable);
+        caption->setAlpha(active ? 1.0f : inactiveAlpha);
     }
     for (auto* label : labels) {
-        label->setColour(juce::Label::textColourId, active ? activeLabelCol : kSectionOffText);
-        label->setAlpha(active ? 1.0f : kSectionDisabledLabelAlpha);
-    }
-    for (auto* slider : sliders) {
-        slider->setAlpha(active ? 1.0f : kSectionDisabledAlpha);
-        slider->setColour(juce::Slider::textBoxTextColourId,
-                          active ? activeValueTextCol : activeValueTextCol.withMultipliedAlpha(0.38f));
-        slider->setColour(juce::Slider::textBoxBackgroundColourId,
-                          active ? activeValueBgCol : activeValueBgCol.withMultipliedAlpha(0.45f));
-        slider->setColour(juce::Slider::textBoxOutlineColourId,
-                          active ? activeValueOutlineCol : activeValueOutlineCol.withMultipliedAlpha(0.35f));
+        label->setEnabled(true);
+        label->setColour(juce::Label::textColourId, active ? activeLabelCol : kSectionOffTextReadable);
+        label->setAlpha(active ? 1.0f : inactiveAlpha);
     }
 }
 }
@@ -149,12 +178,19 @@ void applyEncoderSectionStyle(bool active,
 void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     juce::Graphics& g, int x, int y, int width, int height, float sliderPosProportional,
     float rotaryStartAngle, float rotaryEndAngle, juce::Slider& slider) {
+    const bool compact = compactSliders_.count(&slider) > 0;
+    const bool softOff = !slider.isEnabled() && softDisabledSliders_.count(&slider) > 0;
+    const float inset = compact ? 4.0f : 9.0f;
+    const float strokeWidth = compact ? 3.5f : 6.0f;
+    const float radiusTrim = compact ? 3.0f : 7.0f;
+    const float markerRadius = compact ? 3.0f : 4.5f;
+
     const auto bounds = juce::Rectangle<float>((float) x, (float) y, (float) width, (float) height)
-        .reduced(9.0f);
-    const auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - 7.0f;
+        .reduced(inset);
+    const auto radius = juce::jmax(4.0f, juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f - radiusTrim);
     const auto centre = bounds.getCentre();
     const auto angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
-    const auto stroke = juce::PathStrokeType(6.0f, juce::PathStrokeType::curved,
+    const auto stroke = juce::PathStrokeType(strokeWidth, juce::PathStrokeType::curved,
                                              juce::PathStrokeType::rounded);
     const auto green = juce::Colour(0xff6ee07a);
 
@@ -162,37 +198,53 @@ void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     inactiveArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
                               rotaryStartAngle, rotaryEndAngle, true);
     const bool enabled = slider.isEnabled();
-    g.setColour(green.withAlpha(enabled ? 0.24f : 0.08f));
+    const float inactiveArcAlpha = enabled ? 0.24f : (softOff ? 0.14f : 0.08f);
+    const float activeArcAlpha = enabled ? 0.95f : (softOff ? 0.32f : 0.18f);
+    const float hubRingAlpha = enabled ? 0.14f : (softOff ? 0.09f : 0.05f);
+    const float markerFillAlpha = enabled ? 1.0f : (softOff ? 0.42f : 0.22f);
+    const float markerStrokeAlpha = enabled ? 1.0f : (softOff ? 0.42f : 0.22f);
+    g.setColour(green.withAlpha(inactiveArcAlpha));
     g.strokePath(inactiveArc, stroke);
 
     juce::Path activeArc;
     activeArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
                             rotaryStartAngle, angle, true);
-    g.setColour(green.withAlpha(enabled ? 0.95f : 0.18f));
+    g.setColour(green.withAlpha(activeArcAlpha));
     g.strokePath(activeArc, stroke);
 
     g.setColour(juce::Colour(0xff15181d));
     g.fillEllipse(bounds.withSizeKeepingCentre(radius * 1.5f, radius * 1.5f));
-    g.setColour(juce::Colours::white.withAlpha(enabled ? 0.14f : 0.05f));
+    g.setColour(juce::Colours::white.withAlpha(hubRingAlpha));
     g.drawEllipse(bounds.withSizeKeepingCentre(radius * 1.5f, radius * 1.5f), 1.0f);
 
-    const auto markerRadius = 4.5f;
     const auto markerDistance = radius;
     const auto marker = juce::Point<float>(
         centre.x + std::cos(angle - juce::MathConstants<float>::halfPi) * markerDistance,
         centre.y + std::sin(angle - juce::MathConstants<float>::halfPi) * markerDistance);
-    g.setColour(juce::Colour(0xffeaffed).withAlpha(enabled ? 1.0f : 0.22f));
+    g.setColour(juce::Colour(0xffeaffed).withAlpha(markerFillAlpha));
     g.fillEllipse(marker.x - markerRadius, marker.y - markerRadius,
                   markerRadius * 2.0f, markerRadius * 2.0f);
-    g.setColour(green.withAlpha(enabled ? 1.0f : 0.22f));
+    g.setColour(green.withAlpha(markerStrokeAlpha));
     g.drawEllipse(marker.x - markerRadius, marker.y - markerRadius,
-                  markerRadius * 2.0f, markerRadius * 2.0f, 1.4f);
+                  markerRadius * 2.0f, markerRadius * 2.0f, compact ? 1.0f : 1.4f);
 }
 
 juce::Font MainComponent::EncoderLookAndFeel::getSliderPopupFont(juce::Slider& slider) {
     if (compactSliders_.count(&slider) > 0)
         return juce::Font(juce::FontOptions(10.0f));
     return juce::LookAndFeel_V4::getSliderPopupFont(slider);
+}
+
+juce::Font MainComponent::EncoderLookAndFeel::getLabelFont(juce::Label& label) {
+    for (auto* parent = label.getParentComponent(); parent != nullptr;
+         parent = parent->getParentComponent()) {
+        if (auto* slider = dynamic_cast<juce::Slider*>(parent)) {
+            if (compactSliders_.count(slider) > 0)
+                return juce::Font(juce::FontOptions(10.0f));
+            break;
+        }
+    }
+    return juce::LookAndFeel_V4::getLabelFont(label);
 }
 
 MainComponent::MainComponent() {
@@ -287,16 +339,16 @@ MainComponent::MainComponent() {
         slider.onValueChange = [this] { applyParamsLive(); };
     };
 
-    fastThresholdLabel_.setText("Peak Threshold", juce::dontSendNotification);
+    fastThresholdLabel_.setText("Peak Thr", juce::dontSendNotification);
     fastRatioLabel_.setText("Peak Ratio", juce::dontSendNotification);
-    glueThresholdLabel_.setText("Glue Threshold", juce::dontSendNotification);
+    glueThresholdLabel_.setText("Glue Thr", juce::dontSendNotification);
     glueRatioLabel_.setText("Glue Ratio", juce::dontSendNotification);
-    targetPreChainLabel_.setText("Work Level", juce::dontSendNotification);
-    deEssFreqLabel_.setText("De-ess Freq", juce::dontSendNotification);
-    deEssThresholdLabel_.setText("De-ess Threshold", juce::dontSendNotification);
-    deEssPresenceLabel_.setText("De-ess Presence", juce::dontSendNotification);
-    deEssRatioLabel_.setText("De-ess Ratio", juce::dontSendNotification);
-    deEssRangeLabel_.setText("De-ess Range", juce::dontSendNotification);
+    targetPreChainLabel_.setText("Target", juce::dontSendNotification);
+    deEssFreqLabel_.setText("Freq", juce::dontSendNotification);
+    deEssThresholdLabel_.setText("Threshold", juce::dontSendNotification);
+    deEssPresenceLabel_.setText("Presence", juce::dontSendNotification);
+    deEssRatioLabel_.setText("Ratio", juce::dontSendNotification);
+    deEssRangeLabel_.setText("Range", juce::dontSendNotification);
 
     const auto defaults = vc::fixedVoiceCleanupParams();
     configureProSlider(fastThresholdSlider_, -36.0, -6.0, 0.5, defaults.fastCompThresholdDb, " dB");
@@ -309,6 +361,20 @@ MainComponent::MainComponent() {
     configureProSlider(deEssPresenceSlider_, -36.0, -6.0, 0.5, defaults.deEssPresenceThresholdDb, " dB");
     configureProSlider(deEssRatioSlider_, 1.0, 12.0, 0.1, defaults.deEssRatio, ":1");
     configureProSlider(deEssRangeSlider_, 0.0, 18.0, 0.5, defaults.deEssRangeDb, " dB");
+
+    for (auto* label : { &fastThresholdLabel_, &fastRatioLabel_, &glueThresholdLabel_, &glueRatioLabel_,
+                         &targetPreChainLabel_, &deEssFreqLabel_, &deEssThresholdLabel_,
+                         &deEssPresenceLabel_, &deEssRatioLabel_, &deEssRangeLabel_ }) {
+        label->setFont(juce::Font(juce::FontOptions(10.0f)));
+        label->setJustificationType(juce::Justification::centred);
+    }
+    for (auto* slider : { &fastThresholdSlider_, &fastRatioSlider_, &glueThresholdSlider_,
+                          &glueRatioSlider_, &targetPreChainSlider_, &deEssFreqSlider_,
+                          &deEssThresholdSlider_, &deEssPresenceSlider_, &deEssRatioSlider_,
+                          &deEssRangeSlider_ }) {
+        encoderLookAndFeel_.markCompact(*slider);
+        slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 54, 16);
+    }
 
     resetProButton_.onClick = [this] { resetProDefaults(); };
     resetProButton_.setWantsKeyboardFocus(false);
@@ -324,13 +390,14 @@ MainComponent::MainComponent() {
     addAndMakeVisible(listenButton_);
     updateListenButton();
 
-    musicCaption_.setText("Backing Music", juce::dontSendNotification);
+    musicCaption_.setText("Background", juce::dontSendNotification);
+    musicCaption_.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(musicCaption_);
 
-    // Small mute toggle at the start of the Backing Music section: silences the
+    // Small mute toggle at the start of the Background Music section: silences the
     // music channel so the voice can be auditioned alone.
     musicMuteButton_.setClickingTogglesState(true);
-    musicMuteButton_.setTooltip("Mute backing music (voice only)");
+    musicMuteButton_.setTooltip("Mute background music (voice only)");
     musicMuteButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb24a4a));
     musicMuteButton_.onClick = [this] {
         player_.setMusicMuted(musicMuteButton_.getToggleState());
@@ -360,7 +427,7 @@ MainComponent::MainComponent() {
     musicClipBox_.setVisible(false);
 
     musicStartLabel_.setText("Start", juce::dontSendNotification);
-    musicMasterVolumeLabel_.setText("Music Volume", juce::dontSendNotification);
+    musicMasterVolumeLabel_.setText("Volume", juce::dontSendNotification);
     musicVolumeLabel_.setText("Clip Volume", juce::dontSendNotification);
     musicFadeInLabel_.setText("Fade in", juce::dontSendNotification);
     musicFadeOutLabel_.setText("Fade out", juce::dontSendNotification);
@@ -393,14 +460,15 @@ MainComponent::MainComponent() {
     // reduction behave like a sidechain compressor; "Mid focus" blends from
     // full-band ducking (0%) toward mid-band-only ducking (100%), so the music's
     // low end and highs survive while the clashing mids duck.
-    duckCaption_.setText("Ducking", juce::dontSendNotification);
+    duckCaption_.setText("Auto volume", juce::dontSendNotification);
+    duckCaption_.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(duckCaption_);
 
     // Ducking on/off: off by default; when off controls gray out and the duck
     // curve hides, but the monitor and knobs stay in the layout.
     duckOnOffButton_.setClickingTogglesState(true);
     duckOnOffButton_.setToggleState(false, juce::dontSendNotification);
-    duckOnOffButton_.setTooltip("Enable background ducking");
+    duckOnOffButton_.setTooltip("Enable auto volume (duck music under the voice)");
     duckOnOffButton_.onClick = [this] {
         updateDuckingUi();
         markProjectDirty();
@@ -432,7 +500,7 @@ MainComponent::MainComponent() {
     player_.setDuckBlend(duckFilterSlider_.getValue() / 100.0);
 
     // The backing-music section is busy, so its encoders are made narrower than
-    // the main ones: smaller label/value fonts and tighter value boxes.
+    // the main ones: compact caption fonts and tighter value boxes.
     for (auto* label : { &musicMasterVolumeLabel_, &musicVolumeLabel_,
                          &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ }) {
         label->setFont(juce::Font(juce::FontOptions(10.0f)));
@@ -443,10 +511,52 @@ MainComponent::MainComponent() {
         encoderLookAndFeel_.markCompact(*slider);
         slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 66, 18);
     }
+    for (auto* slider : { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
+        encoderLookAndFeel_.markSoftDisabled(*slider);
 
     addAndMakeVisible(duckView_);
+
+    // The background-music section folds away by default so the simple "clean up
+    // a voice file" flow stays uncluttered. Collapsed, a slim full-width bar
+    // reveals it; expanded, the bar is gone and a small "Hide" button in the
+    // section header folds it back so no vertical space is wasted.
+    musicSectionToggle_.setWantsKeyboardFocus(false);
+    musicSectionToggle_.setTooltip("Show the background-music timeline and controls");
+    musicSectionToggle_.onClick = [this] { setMusicSectionExpanded(true); };
+    addAndMakeVisible(musicSectionToggle_);
+
+    musicHideButton_.setWantsKeyboardFocus(false);
+    musicHideButton_.setTooltip("Hide the background-music section");
+    musicHideButton_.onClick = [this] { setMusicSectionExpanded(false); };
+    addChildComponent(musicHideButton_);
+
+    // Background-music behaviour preference (lives in the settings General tab;
+    // configured here, re-parented when the settings window opens).
+    musicSectionModeLabel_.setText("Background music", juce::dontSendNotification);
+    musicSectionModeBox_.addItem("Foldable (show a button)", 1);
+    musicSectionModeBox_.addItem("Always shown", 2);
+    musicSectionModeBox_.addItem("Always hidden", 3);
+    musicSectionModeBox_.setTooltip("Choose whether the background-music section is "
+                                    "foldable, always shown, or always hidden");
+    musicSectionMode_ = static_cast<MusicSectionMode>(juce::jlimit(
+        0, 2, globalPrefs().getIntValue("musicSectionMode",
+                                        static_cast<int>(MusicSectionMode::Foldable))));
+    musicSectionModeBox_.setSelectedId(static_cast<int>(musicSectionMode_) + 1,
+                                       juce::dontSendNotification);
+    musicSectionModeBox_.onChange = [this] {
+        setMusicSectionMode(static_cast<MusicSectionMode>(musicSectionModeBox_.getSelectedId() - 1));
+    };
+
+    // Help: the "?" button mirrors the Help menu's "User Guide".
+    helpButton_.setWantsKeyboardFocus(false);
+    helpButton_.setTooltip("Open the user guide");
+    helpButton_.onClick = [this] { openHelp(); };
+    addAndMakeVisible(helpButton_);
+
+    captureSectionChromeBaselines();
     updateMusicMuteUi();
     updateDuckingUi();
+    applyMusicSectionMode();
 
     // Start, fade in and fade out are now adjusted on the timeline; these
     // controls stay as hidden mirrors of the selected clip's values.
@@ -560,7 +670,10 @@ MainComponent::MainComponent() {
     deviceManager_.addChangeListener(this);
 
     startTimerHz(30);
-    setSize(kDefaultWindowWidth, kDefaultWindowHeight);
+    const int initialHeight = musicSectionExpanded_ ? kExpandedWindowHeight
+        : (musicSectionMode_ == MusicSectionMode::AlwaysOff ? kVoiceOnlyWindowHeight
+                                                            : kCollapsedWindowHeight);
+    setSize(kDefaultWindowWidth, initialHeight);
     grabKeyboardFocus();
     juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
         if (safe != nullptr)
@@ -643,9 +756,15 @@ void MainComponent::refreshMusicClipList() {
     for (int i = 0; i < static_cast<int>(clips.size()); ++i)
         musicClipBox_.addItem(juce::String(i + 1) + ". " + clips[static_cast<std::size_t>(i)].name, i + 1);
 
-    if (!clips.empty())
+    if (!clips.empty()) {
         musicClipBox_.setSelectedId(juce::jlimit(1, static_cast<int>(clips.size()), previous > 0 ? previous : 1),
                                     juce::dontSendNotification);
+        // A project that actually uses background music should open with the
+        // section revealed (only relevant in Foldable mode — the other modes are
+        // already forced open or closed).
+        if (musicSectionMode_ == MusicSectionMode::Foldable && !musicSectionExpanded_)
+            setMusicSectionExpanded(true);
+    }
     syncMusicControlsFromSelection();
     player_.setMusicClips(clips);
     updateMusicTimeline();
@@ -911,9 +1030,16 @@ void MainComponent::applyWindowConstraints() {
     if (constrainer == nullptr)
         return;
 
-    // The main window now has a fixed content height (audio + pro controls live
-    // in the separate settings window).
-    const int contentHeight = kDefaultWindowHeight;
+    // The main window has a fixed content height that depends on the
+    // background-music section's state (audio + pro controls live in the separate
+    // settings window).
+    int contentHeight = kCollapsedWindowHeight;
+    if (musicSectionExpanded_)
+        contentHeight = kExpandedWindowHeight;
+    else if (musicSectionMode_ == MusicSectionMode::AlwaysOff)
+        contentHeight = kVoiceOnlyWindowHeight; // no disclosure bar either
+    else
+        contentHeight = kCollapsedWindowHeight;
 
     // Translate content size into window size (native title bar adds chrome).
     const int chromeH = window->getHeight() - getHeight();
@@ -925,6 +1051,78 @@ void MainComponent::applyWindowConstraints() {
     // down to the floor.
     constrainer->setSizeLimits(minWinW, winH, 4096, winH);
     window->setSize(window->getWidth(), winH);
+}
+
+juce::String MainComponent::buildProjectInfoText() const {
+    if (!engine_.hasAudio())
+        return "No media loaded.\n\nDrop a video or audio file to see how it is "
+               "analysed and processed.";
+
+    const auto fmtDb = [](double db) {
+        return (db >= 0.0 ? "+" : "") + juce::String(db, 1) + " dB";
+    };
+
+    const auto p = buildParams();
+    const auto& buf = engine_.beforeBuffer();
+    const double sr = engine_.sampleRate();
+    const double seconds = sr > 0.0 ? buf.getNumSamples() / sr : 0.0;
+    const int minutes = static_cast<int>(seconds) / 60;
+    const int secs = static_cast<int>(seconds) % 60;
+
+    juce::StringArray lines;
+
+    lines.add("SOURCE");
+    lines.add("  File: " + engine_.sourceFile().getFileName());
+    lines.add("  Type: " + juce::String(engine_.sourceHasVideo() ? "video" : "audio"));
+    lines.add("  Length: " + juce::String::formatted("%d:%02d", minutes, secs)
+              + "   Sample rate: " + juce::String(static_cast<int>(sr)) + " Hz"
+              + "   Channels: " + juce::String(buf.getNumChannels()));
+    lines.add("");
+
+    lines.add("ANALYSIS");
+    lines.add("  Input loudness: " + juce::String(engine_.inputLufs(), 1) + " LUFS");
+    lines.add("  Input peak: " + juce::String(engine_.inputPeakDb(), 1) + " dBFS");
+
+    const double f0 = engine_.voiceFundamentalHz();
+    if (f0 > 0.0)
+        lines.add("  Voice fundamental (F0): " + juce::String(f0, 1) + " Hz");
+    else
+        lines.add("  Voice fundamental (F0): not detected (using default EQ layout)");
+
+    lines.add(juce::String("  Voice profile: ")
+              + (engine_.voiceProfileUsesDenoised()
+                     ? "measured from denoised (speech-only) signal"
+                     : (engine_.hasDenoised() ? "dry signal (denoise ready)"
+                                              : "dry signal (denoising in background...)")));
+    lines.add("");
+
+    lines.add("PROCESSING DECISIONS");
+    lines.add("  Volume boost (calibration): " + fmtDb(p.inputCalibrationGainDb));
+    lines.add("  Intensity: " + juce::String(juce::roundToInt(currentIntensity() * 100.0)) + " %");
+    lines.add("  Noise reduction: "
+              + juce::String(juce::roundToInt(noiseReductionSlider_.getValue())) + " %");
+    lines.add("  High-pass (rumble): " + juce::String(static_cast<int>(p.highpassHz)) + " Hz");
+    lines.add("  Target loudness: " + juce::String(p.targetLufs, 1) + " LUFS");
+
+    const double tone = currentToneAmount();
+    juce::String toneDesc = tone > 0.05 ? "crisp" : (tone < -0.05 ? "warm" : "natural");
+    lines.add("  Tone: " + toneDesc + " (" + juce::String(juce::roundToInt(tone * 100.0)) + " %)");
+    lines.add("");
+
+    lines.add("AUTO-EQ (derived from the voice spectrum)");
+    if (p.autoEqBands.empty()) {
+        lines.add("  (no corrective bands — spectrum already balanced)");
+    } else {
+        for (const auto& b : p.autoEqBands) {
+            const char* type = b.type == vc::EqBand::Type::LowShelf  ? "Low shelf "
+                             : b.type == vc::EqBand::Type::HighShelf ? "High shelf"
+                                                                     : "Peak      ";
+            lines.add("  " + juce::String(type) + " @ "
+                      + juce::String(static_cast<int>(b.freq)) + " Hz: " + fmtDb(b.gainDb));
+        }
+    }
+
+    return lines.joinIntoString("\n");
 }
 
 void MainComponent::openSettings() {
@@ -939,18 +1137,27 @@ void MainComponent::openSettings() {
     refreshOutputDeviceList();
 
     auto content = std::make_unique<SettingsComponent>();
-    content->setAudioControls(followSystemButton_, outputDeviceLabel_, outputDeviceBox_);
-    content->setProControls({ { &fastThresholdLabel_, &fastThresholdSlider_ },
-                              { &fastRatioLabel_, &fastRatioSlider_ },
-                              { &glueThresholdLabel_, &glueThresholdSlider_ },
-                              { &glueRatioLabel_, &glueRatioSlider_ },
-                              { &targetPreChainLabel_, &targetPreChainSlider_ },
-                              { &deEssFreqLabel_, &deEssFreqSlider_ },
-                              { &deEssThresholdLabel_, &deEssThresholdSlider_ },
-                              { &deEssPresenceLabel_, &deEssPresenceSlider_ },
-                              { &deEssRatioLabel_, &deEssRatioSlider_ },
-                              { &deEssRangeLabel_, &deEssRangeSlider_ } },
-                            resetProButton_);
+    content->setProjectInfo(buildProjectInfoText());
+    content->setGeneralControls(musicSectionModeLabel_, musicSectionModeBox_,
+                                followSystemButton_, outputDeviceLabel_, outputDeviceBox_);
+    content->setProControls({
+        { "LEVEL",
+          { { &targetPreChainLabel_, &targetPreChainSlider_ } },
+          1 },
+        { "COMPRESSORS",
+          { { &fastThresholdLabel_, &fastThresholdSlider_ },
+            { &fastRatioLabel_, &fastRatioSlider_ },
+            { &glueThresholdLabel_, &glueThresholdSlider_ },
+            { &glueRatioLabel_, &glueRatioSlider_ } },
+          4 },
+        { "DE-ESS",
+          { { &deEssFreqLabel_, &deEssFreqSlider_ },
+            { &deEssThresholdLabel_, &deEssThresholdSlider_ },
+            { &deEssPresenceLabel_, &deEssPresenceSlider_ },
+            { &deEssRatioLabel_, &deEssRatioSlider_ },
+            { &deEssRangeLabel_, &deEssRangeSlider_ } },
+          5 },
+    }, resetProButton_);
 
     auto window = std::make_unique<SettingsDialogWindow>("Settings", juce::Colour(0xff2b2f36));
     window->onClose = [this] { closeSettings(); };
@@ -980,7 +1187,7 @@ void MainComponent::updateMainMenu() {
 }
 
 juce::StringArray MainComponent::getMenuBarNames() {
-    return { "File", "View" };
+    return { "File" };
 }
 
 juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce::String&) {
@@ -990,8 +1197,13 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelMenuIndex, const juce
         menu.addItem(openProjectManagerMenuId, "Projects...");
         menu.addSeparator();
         menu.addItem(saveProjectMenuId, "Save Project");
-    } else if (topLevelMenuIndex == 1) {
+        menu.addSeparator();
         menu.addItem(openSettingsMenuId, "Settings...", true, settingsWindow_ != nullptr);
+        menu.addSeparator();
+        menu.addItem(userGuideMenuId, "User Guide");
+        menu.addItem(keyboardShortcutsMenuId, "Keyboard Shortcuts");
+        menu.addSeparator();
+        menu.addItem(aboutMenuId, "About Voice Control");
     }
     return menu;
 }
@@ -1009,6 +1221,15 @@ void MainComponent::menuItemSelected(int menuItemID, int) {
             break;
         case openSettingsMenuId:
             openSettings();
+            break;
+        case userGuideMenuId:
+            openHelp();
+            break;
+        case keyboardShortcutsMenuId:
+            showKeyboardShortcuts();
+            break;
+        case aboutMenuId:
+            showAbout();
             break;
         default:
             break;
@@ -1088,6 +1309,7 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
     engine_.clear();
     musicUndoStack_.clear();
     musicClipBox_.clear(juce::dontSendNotification);
+    applyMusicSectionMode(); // re-expanded later if the project has clips (Foldable)
     spectrumView_.setSpectrum({});
     spectrumView_.setProcessedSpectrum({});
     updateMusicTimeline();
@@ -1261,6 +1483,7 @@ void MainComponent::clearProject() {
     spectrumView_.setProcessedSpectrum({});
     musicUndoStack_.clear();
     musicClipBox_.clear(juce::dontSendNotification);
+    applyMusicSectionMode();
     updateMusicTimeline();
     resetProDefaults();
     toneSlider_.setValue(0.0, juce::dontSendNotification);
@@ -1639,7 +1862,7 @@ void MainComponent::restorePendingMusicClipsAfterVoiceLoad(const juce::File& voi
     pendingSelectedMusicClipRestore_ = -1;
 
     runOnWorker(
-        "Restoring backing music...",
+        "Restoring background music...",
         [this, clipsToRestore]() -> juce::String {
             for (const auto& saved : clipsToRestore) {
                 if (!saved.file.existsAsFile())
@@ -1671,7 +1894,7 @@ void MainComponent::restorePendingMusicClipsAfterVoiceLoad(const juce::File& voi
             restoringProject_ = false;
             projectDirty_ = false;
             saveAutosaveSession();
-            setUiBusy(false, loadedMessage + " Backing music restored.");
+            setUiBusy(false, loadedMessage + " Background music restored.");
             dropArea_.setStatus(voiceFile.getFileName());
         });
 }
@@ -1711,8 +1934,17 @@ void MainComponent::loadFile(const juce::File& file) {
                 return measuredParams;
             };
 
-            intensityMinLoudnessRef_ = engine_.measureChainLoudness(makeMeasuredParams(0.0));
-            intensityMaxLoudnessRef_ = engine_.measureChainLoudness(makeMeasuredParams(1.0));
+            // The intensity loudness references mean two full offline chain
+            // renders of the whole file. Reuse the cached values when the
+            // analysis cache supplied them; only measure on a cache miss.
+            if (engine_.hasIntensityLoudnessRefs()) {
+                intensityMinLoudnessRef_ = engine_.intensityMinLoudnessRef();
+                intensityMaxLoudnessRef_ = engine_.intensityMaxLoudnessRef();
+            } else {
+                intensityMinLoudnessRef_ = engine_.measureChainLoudness(makeMeasuredParams(0.0));
+                intensityMaxLoudnessRef_ = engine_.measureChainLoudness(makeMeasuredParams(1.0));
+                engine_.setIntensityLoudnessRefs(intensityMinLoudnessRef_, intensityMaxLoudnessRef_);
+            }
             return {};
         },
         [this, file]() {
@@ -1752,7 +1984,7 @@ void MainComponent::loadFile(const juce::File& file) {
 
 void MainComponent::addMusicClip(double startSeconds) {
     musicChooser_ = std::make_unique<juce::FileChooser>(
-        "Add backing music", juce::File(), "*.wav;*.mp3;*.m4a;*.flac;*.aiff");
+        "Add background music", juce::File(), "*.wav;*.mp3;*.m4a;*.flac;*.aiff");
     musicChooser_->launchAsync(
         juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
         [this, startSeconds](const juce::FileChooser& fc) {
@@ -1761,7 +1993,7 @@ void MainComponent::addMusicClip(double startSeconds) {
             const auto undoState = MusicUndoState { engine_.musicClips(), musicClipBox_.getSelectedId() - 1 };
 
             runOnWorker(
-                "Adding backing music...",
+                "Adding background music...",
                 [this, file]() -> juce::String {
                     juce::String err;
                     if (!engine_.addMusicClip(file, err))
@@ -1792,7 +2024,7 @@ void MainComponent::addMusicClip(double startSeconds) {
                     refreshMusicClipList();
                     if (index >= 0)
                         musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
-                    setUiBusy(false, "Backing music added.");
+                    setUiBusy(false, "Background music added.");
                     markProjectDirty();
                 });
         });
@@ -1890,6 +2122,178 @@ void MainComponent::updateListenButton() {
     listenButton_.setColour(juce::TextButton::buttonOnColourId, col);
 }
 
+void MainComponent::setMusicSectionExpanded(bool expanded) {
+    musicSectionExpanded_ = expanded;
+
+    // The disclosure bar and the "Hide" header button only exist in Foldable
+    // mode. "Always shown" keeps the section open with no way to fold it; "Always
+    // hidden" never shows the section or its entry point.
+    const bool foldable = musicSectionMode_ == MusicSectionMode::Foldable;
+    musicSectionToggle_.setButtonText(juce::String::fromUTF8("▸  Add background music"));
+    musicSectionToggle_.setVisible(!expanded && foldable);
+    musicHideButton_.setVisible(expanded && foldable);
+
+    for (auto* c : { static_cast<juce::Component*>(&musicCaption_),
+                     static_cast<juce::Component*>(&musicMuteButton_),
+                     static_cast<juce::Component*>(&musicMasterVolumeLabel_),
+                     static_cast<juce::Component*>(&musicMasterVolumeSlider_),
+                     static_cast<juce::Component*>(&musicVolumeLabel_),
+                     static_cast<juce::Component*>(&musicVolumeSlider_),
+                     static_cast<juce::Component*>(&duckCaption_),
+                     static_cast<juce::Component*>(&duckOnOffButton_),
+                     static_cast<juce::Component*>(&duckLookAheadLabel_),
+                     static_cast<juce::Component*>(&duckLookAheadSlider_),
+                     static_cast<juce::Component*>(&duckReductionLabel_),
+                     static_cast<juce::Component*>(&duckReductionSlider_),
+                     static_cast<juce::Component*>(&duckFilterLabel_),
+                     static_cast<juce::Component*>(&duckFilterSlider_),
+                     static_cast<juce::Component*>(&duckView_) })
+        c->setVisible(expanded);
+
+    musicTimeline_.setMusicLaneVisible(expanded);
+
+    applyWindowConstraints(); // relock the window to the new fixed height
+    resized();
+    repaint();
+}
+
+void MainComponent::applyMusicSectionMode() {
+    bool expanded = false;
+    switch (musicSectionMode_) {
+        case MusicSectionMode::AlwaysOn:  expanded = true; break;
+        case MusicSectionMode::AlwaysOff: expanded = false; break;
+        case MusicSectionMode::Foldable:  expanded = !engine_.musicClips().empty(); break;
+    }
+    setMusicSectionExpanded(expanded);
+}
+
+void MainComponent::setMusicSectionMode(MusicSectionMode mode) {
+    musicSectionMode_ = mode;
+    globalPrefs().setValue("musicSectionMode", static_cast<int>(mode));
+    globalPrefs().saveIfNeeded();
+    if (musicSectionModeBox_.getSelectedId() != static_cast<int>(mode) + 1)
+        musicSectionModeBox_.setSelectedId(static_cast<int>(mode) + 1, juce::dontSendNotification);
+    applyMusicSectionMode();
+}
+
+void MainComponent::openHelp() {
+    if (helpWindow_ != nullptr) {
+        helpWindow_->toFront(true);
+        return;
+    }
+
+    auto body = std::make_unique<juce::TextEditor>();
+    body->setMultiLine(true);
+    body->setReadOnly(true);
+    body->setCaretVisible(false);
+    body->setScrollbarsShown(true);
+    body->setPopupMenuEnabled(false);
+    body->setFont(juce::Font(juce::FontOptions(14.0f)));
+    body->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff14161b));
+    body->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+    body->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+    body->setColour(juce::TextEditor::textColourId, juce::Colours::white.withAlpha(0.88f));
+    body->setText(juce::String::fromUTF8(
+        "Voice Control — User Guide\n"
+        "================================\n\n"
+        "1. Load a voice recording\n"
+        "   Drag an audio or video file onto the Voice lane (or click it to "
+        "browse). Voice Control analyses the file, then plays it back cleaned up "
+        "in real time.\n\n"
+        "2. Shape the voice\n"
+        "   • Strength — how hard the cleanup chain works overall.\n"
+        "   • Tone — darker to brighter tonal balance.\n"
+        "   • Noise reduction — how much background noise is removed.\n"
+        "   Press Play (or the spacebar) to audition. Use Bypass to compare with "
+        "the untouched original. The meters show compression, de-essing, limiting "
+        "and output level.\n\n"
+        "3. Add background music (optional)\n"
+        "   Click “Add background music” to reveal the music lane and its "
+        "controls, then drop a music file onto the Background lane. Drag clips to "
+        "move them, drag the edges to trim, and drag the top corners to set "
+        "fades.\n"
+        "   • Volume / Clip volume — overall and per-clip levels.\n"
+        "   • Mute — silence the music to check the voice alone.\n"
+        "   • Auto volume — automatically dips the music under the voice. "
+        "Tune look-ahead, reduction and mid-focus.\n"
+        "   Use Hide to fold the section away again. In Settings › General you "
+        "can make the section always shown, always hidden, or foldable.\n\n"
+        "4. Export\n"
+        "   Click Export to render the result. If the source was a video, the "
+        "cleaned audio is muxed back into it.\n\n"
+        "5. Projects\n"
+        "   Work is autosaved. Use File › Projects to manage saved sessions; "
+        "File › Save Project to store the current one.\n\n"
+        "Keyboard shortcuts\n"
+        "   Space — Play / pause\n"
+        "   Cmd/Ctrl+N — New project\n"
+        "   Cmd/Ctrl+O — Open projects\n"
+        "   Cmd/Ctrl+S — Save project\n"),
+        juce::dontSendNotification);
+
+    auto content = std::make_unique<HelpContent>();
+    content->setBody(std::move(body));
+    content->setSize(560, 480);
+
+    auto window = std::make_unique<SettingsDialogWindow>("User Guide", juce::Colour(0xff2b2f36));
+    window->onClose = [this] { closeHelp(); };
+    window->setUsingNativeTitleBar(true);
+    window->setContentOwned(content.release(), true);
+    window->centreAroundComponent(this, 560, 480);
+    window->setResizable(true, false);
+    window->setVisible(true);
+    helpWindow_.reset(window.release());
+}
+
+void MainComponent::closeHelp() {
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<MainComponent>(this)] {
+        if (safe != nullptr)
+            safe->helpWindow_.reset();
+    });
+}
+
+void MainComponent::showKeyboardShortcuts() {
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::InfoIcon,
+        "Keyboard Shortcuts",
+        "Space\t\tPlay / pause\n"
+        "Cmd/Ctrl+N\tNew project\n"
+        "Cmd/Ctrl+O\tOpen projects\n"
+        "Cmd/Ctrl+S\tSave project",
+        "OK", this);
+}
+
+void MainComponent::showAbout() {
+    juce::String version = "0.1.0";
+    if (auto* app = juce::JUCEApplication::getInstance())
+        version = app->getApplicationVersion();
+    juce::AlertWindow::showMessageBoxAsync(
+        juce::AlertWindow::InfoIcon,
+        "About Voice Control",
+        "Voice Control " + version + "\n\n"
+        "Clean up voice recordings and add background music, "
+        "then export back to audio or video.",
+        "OK", this);
+}
+
+void MainComponent::captureSectionChromeBaselines() {
+    if (sectionChromeBaselinesCaptured_)
+        return;
+    sectionActiveLabelColour_ = musicCaption_.findColour(juce::Label::textColourId);
+    sectionActiveSliderTextColour_ = musicMasterVolumeSlider_.findColour(juce::Slider::textBoxTextColourId);
+    sectionActiveSliderBgColour_ = musicMasterVolumeSlider_.findColour(juce::Slider::textBoxBackgroundColourId);
+    sectionActiveSliderOutlineColour_ =
+        musicMasterVolumeSlider_.findColour(juce::Slider::textBoxOutlineColourId);
+    sectionChromeBaselinesCaptured_ = true;
+}
+
+void MainComponent::restoreSectionSliderChrome(juce::Slider& slider) const {
+    slider.setAlpha(1.0f);
+    slider.setColour(juce::Slider::textBoxTextColourId, sectionActiveSliderTextColour_);
+    slider.setColour(juce::Slider::textBoxBackgroundColourId, sectionActiveSliderBgColour_);
+    slider.setColour(juce::Slider::textBoxOutlineColourId, sectionActiveSliderOutlineColour_);
+}
+
 void MainComponent::updateDuckingUi() {
     const bool on = duckOnOffButton_.getToggleState();
     duckOnOffButton_.setButtonText(on ? "On" : "Off");
@@ -1899,20 +2303,23 @@ void MainComponent::updateDuckingUi() {
     const auto onGreen = juce::Colour(0xff6ee07a);
     duckOnOffButton_.setColour(juce::TextButton::buttonColourId, offGrey);
     duckOnOffButton_.setColour(juce::TextButton::buttonOnColourId, on ? onGreen : offGrey);
-    duckOnOffButton_.setColour(juce::TextButton::textColourOffId, on ? juce::Colours::white : kSectionOffText);
+    duckOnOffButton_.setColour(juce::TextButton::textColourOffId,
+                               on ? juce::Colours::white : kSectionOffTextReadable);
     duckOnOffButton_.setColour(juce::TextButton::textColourOnId, juce::Colour(0xff101217));
 
     for (auto* label : { &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ })
-        label->setEnabled(on);
-    for (auto* slider : { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
+        label->setEnabled(true);
+    for (auto* slider : { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ }) {
+        restoreSectionSliderChrome(*slider);
         slider->setEnabled(on);
+        slider->repaint();
+    }
 
     applyEncoderSectionStyle(on,
                              &duckCaption_,
                              { &duckLookAheadLabel_, &duckReductionLabel_, &duckFilterLabel_ },
-                             { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ },
-                             musicCaption_,
-                             musicMasterVolumeSlider_);
+                             sectionActiveLabelColour_,
+                             kSectionDisabledLabelAlphaSoft);
 
     duckView_.setDuckingEnabled(on);
 }
@@ -1930,21 +2337,21 @@ void MainComponent::updateMusicMuteUi() {
 
     musicMasterVolumeSlider_.setEnabled(masterActive);
     musicVolumeSlider_.setEnabled(clipActive);
+    restoreSectionSliderChrome(musicMasterVolumeSlider_);
+    restoreSectionSliderChrome(musicVolumeSlider_);
+    musicMasterVolumeSlider_.repaint();
+    musicVolumeSlider_.repaint();
     for (auto* s : { &musicStartSlider_, &musicFadeInSlider_, &musicFadeOutSlider_ })
         s->setEnabled(!busy && validClip);
 
     applyEncoderSectionStyle(!muted && hasClips,
                              &musicCaption_,
                              { &musicMasterVolumeLabel_ },
-                             { &musicMasterVolumeSlider_ },
-                             musicCaption_,
-                             musicMasterVolumeSlider_);
+                             sectionActiveLabelColour_);
     applyEncoderSectionStyle(clipActive,
                              nullptr,
                              { &musicVolumeLabel_ },
-                             { &musicVolumeSlider_ },
-                             musicCaption_,
-                             musicMasterVolumeSlider_);
+                             sectionActiveLabelColour_);
 }
 
 void MainComponent::setUiBusy(bool busy, const juce::String& message) {
@@ -2038,6 +2445,12 @@ void MainComponent::timerCallback() {
         statusLabel_.setText("Preparing voice profile in background...",
                              juce::dontSendNotification);
     }
+
+    // Once the background denoise finishes, persist the denoised audio so the
+    // next load skips the model entirely. Covers both the fresh-analysis and the
+    // restored-profile-without-audio-cache cases.
+    if (engine_.hasAudio() && !busy_.load(std::memory_order_relaxed))
+        engine_.persistDenoisedAudioIfReady();
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -2061,6 +2474,14 @@ void MainComponent::resized() {
                            int labelHeight = 20) {
         label.setBounds(area.removeFromTop(labelHeight));
         slider.setBounds(area);
+    };
+
+    // Bottom row: a small "?" help button pinned right, progress bar filling the
+    // rest. Used by every exit path below.
+    auto layoutBottomRow = [this](juce::Rectangle<int> row) {
+        helpButton_.setBounds(row.removeFromRight(22));
+        row.removeFromRight(6);
+        progressBar_.setBounds(row);
     };
 
     auto encoderRow = r.removeFromTop(138);
@@ -2099,7 +2520,10 @@ void MainComponent::resized() {
     spectrumView_.setBounds(r.removeFromTop(kSpectrumHeight));
     r.removeFromTop(kWaveformSectionGap);
 
-    auto timelineBounds = r.removeFromTop(kTimelineHeight);
+    // The timeline shrinks to the voice lane alone when the backing-music
+    // section is folded away.
+    const int timelineHeight = musicSectionExpanded_ ? kTimelineHeight : kVoiceLaneHeight;
+    auto timelineBounds = r.removeFromTop(timelineHeight);
     musicTimeline_.setBounds(timelineBounds);
     // The voice drop field covers only the voice lane (top), leaving the music
     // lane below clickable so its own "+" adds a music clip.
@@ -2109,37 +2533,56 @@ void MainComponent::resized() {
     dropArea_.toFront(false);
     r.removeFromTop(8);
 
-    // Backing-music section, laid out columns-first: a left column of music
-    // volume controls, a right column of ducking controls, and a middle column
-    // that gives the duck/oscilloscope screen the section's full height (caption
-    // band included) instead of leaving dead space above it.
-    auto musicArea = r.removeFromTop(116);
-    constexpr int knobWidth = 80;
-    constexpr int labelHeight = 16; // compact labels for this section
+    if (!musicSectionExpanded_) {
+        // "Always hidden": no section and no entry point at all.
+        if (musicSectionMode_ != MusicSectionMode::AlwaysOff) {
+            // Foldable + collapsed: a small left-aligned button, sitting under the
+            // "Voice" label at the left of the timeline, is the only entry point.
+            auto toggleRow = r.removeFromTop(kMusicToggleBarHeight);
+            musicSectionToggle_.setBounds(toggleRow.removeFromLeft(168).withSizeKeepingCentre(168, 22));
+            r.removeFromTop(8);
+        }
+        layoutBottomRow(r.removeFromTop(18));
+        return;
+    }
+
+    // Background-music section: equal-width left/right columns (three 80px pot
+    // slots each) with the duck monitor centered in the space between them.
+    auto musicArea = r.removeFromTop(kMusicControlsHeight);
+    constexpr int labelHeight = 16; // compact captions above section encoders
     constexpr int captionH = 20;
 
-    auto leftCol = musicArea.removeFromLeft(knobWidth * 2);
-    auto rightCol = musicArea.removeFromRight(knobWidth * 3);
+    auto leftCol = musicArea.removeFromLeft(kMusicSideColWidth);
+    auto rightCol = musicArea.removeFromRight(kMusicSideColWidth);
     auto screenCol = musicArea;
 
-    // Left column: "Backing Music" + Mute on top, two volume knobs below.
+    // Left header: "Background" name on the left, Mute + Hide buttons on the
+    // right -- mirrors the duck header (name then buttons) on the other side.
     auto leftCaption = leftCol.removeFromTop(captionH);
-    musicMuteButton_.setBounds(leftCaption.removeFromLeft(50).withSizeKeepingCentre(48, 18));
-    leftCaption.removeFromLeft(6);
+    musicMuteButton_.setBounds(leftCaption.removeFromRight(46).withSizeKeepingCentre(44, 18));
+    leftCaption.removeFromRight(6);
+    if (musicHideButton_.isVisible()) { // absent in "Always shown" mode
+        musicHideButton_.setBounds(leftCaption.removeFromRight(46).withSizeKeepingCentre(44, 18));
+        leftCaption.removeFromRight(6);
+    }
     musicCaption_.setBounds(leftCaption);
-    placeEncoder(leftCol.removeFromLeft(knobWidth).reduced(4, 0),
+
+    // Left controls: two volume encoders centred as two elements, evenly spaced
+    // across the full column width (same span the three duck knobs occupy).
+    auto leftHalf = leftCol.removeFromLeft(leftCol.getWidth() / 2);
+    placeEncoder(leftHalf.withSizeKeepingCentre(kMusicSlotWidth, leftHalf.getHeight()).reduced(4, 0),
                  musicMasterVolumeLabel_, musicMasterVolumeSlider_, labelHeight);
-    placeEncoder(leftCol.reduced(4, 0),
+    placeEncoder(leftCol.withSizeKeepingCentre(kMusicSlotWidth, leftCol.getHeight()).reduced(4, 0),
                  musicVolumeLabel_, musicVolumeSlider_, labelHeight);
 
-    // Right column: On/Off mirrors Mute; "Ducking" + 3 knobs.
+    // Right column: On/Off in the header; "Auto volume" + three knobs below.
     auto rightCaption = rightCol.removeFromTop(captionH);
     duckOnOffButton_.setBounds(rightCaption.removeFromRight(58).withSizeKeepingCentre(56, 18));
     rightCaption.removeFromRight(6);
     duckCaption_.setBounds(rightCaption);
-    placeEncoder(rightCol.removeFromLeft(knobWidth).reduced(4, 0),
+    placeEncoder(rightCol.removeFromLeft(kMusicSlotWidth).reduced(4, 0),
                  duckLookAheadLabel_, duckLookAheadSlider_, labelHeight);
-    placeEncoder(rightCol.removeFromLeft(knobWidth).reduced(4, 0),
+    placeEncoder(rightCol.removeFromLeft(kMusicSlotWidth).reduced(4, 0),
                  duckReductionLabel_, duckReductionSlider_, labelHeight);
     placeEncoder(rightCol.reduced(4, 0),
                  duckFilterLabel_, duckFilterSlider_, labelHeight);
@@ -2149,5 +2592,5 @@ void MainComponent::resized() {
 
     // The Pro controls now live in the settings window (see SettingsComponent),
     // so resized() no longer lays them out here.
-    progressBar_.setBounds(r.removeFromTop(18));
+    layoutBottomRow(r.removeFromTop(18));
 }

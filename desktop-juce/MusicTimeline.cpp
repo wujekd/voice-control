@@ -59,6 +59,13 @@ void MusicTimeline::setClips(const std::vector<MusicClip>* clips, int selectedIn
     repaint();
 }
 
+void MusicTimeline::setMusicLaneVisible(bool visible) {
+    if (musicLaneVisible_ == visible)
+        return;
+    musicLaneVisible_ = visible;
+    repaint();
+}
+
 void MusicTimeline::setPlayheadSeconds(double seconds) {
     playheadSeconds_ = juce::jlimit(0.0, timelineDurationSeconds(), seconds);
     repaint();
@@ -88,6 +95,8 @@ juce::Rectangle<float> MusicTimeline::voiceLaneBounds() const {
 }
 
 juce::Rectangle<float> MusicTimeline::musicLaneBounds() const {
+    if (!musicLaneVisible_)
+        return {};
     const auto b = timelineBounds();
     return { b.getX(), b.getY() + kVoiceLaneHeight + kLaneGap, b.getWidth(),
              static_cast<float>(kMusicLaneHeight) };
@@ -470,11 +479,18 @@ void MusicTimeline::paint(juce::Graphics& g) {
     const auto musicLane = musicLaneBounds();
 
     drawWaveform(g, voiceLane);
-    drawLaneLabel(g, voiceLane, "Voice waveform");
+    drawLaneLabel(g, voiceLane, "Voice");
+
+    if (!musicLaneVisible_) {
+        const float playheadXOnly = static_cast<float>(secondsToX(playheadSeconds_));
+        g.setColour(juce::Colour(0xff6ee07a));
+        g.drawLine(playheadXOnly, voiceLane.getY(), playheadXOnly, voiceLane.getBottom(), 2.5f);
+        return;
+    }
 
     g.setColour(juce::Colour(0xff303640));
     g.fillRoundedRectangle(musicLane, 4.0f);
-    drawLaneLabel(g, musicLane, "Music");
+    drawLaneLabel(g, musicLane, "Background");
     drawGapPluses(g);
 
     if (clips_ != nullptr) {
