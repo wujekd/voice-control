@@ -33,6 +33,14 @@ public:
     // Allocate the output buffer to match `source` and launch the worker.
     // `source` is referenced, not copied. modelPath is the DeepFilterNet tar.gz.
     void start(const AudioBuffer& source, const std::string& modelPath);
+
+    // Adopt an already-denoised buffer (e.g. restored from the on-disk cache)
+    // instead of running the model: copies it in, marks every hop valid, and
+    // reports complete immediately. Returns false (and does nothing) if the
+    // buffer's geometry doesn't match `source`, so the caller can fall back to
+    // start(). Neither buffer is referenced after the call.
+    bool loadPrecomputed(const AudioBuffer& source, const AudioBuffer& denoised);
+
     void stop();
 
     bool active() const { return active_.load(std::memory_order_acquire); }

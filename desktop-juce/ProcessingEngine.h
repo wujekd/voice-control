@@ -51,6 +51,9 @@ public:
     const vc::SpectrumResult& drySpectrum() const { return drySpectrum_; }
     const std::vector<vc::EqBand>& autoEqBands() const { return autoEqBands_; }
     std::vector<vc::EqBand> autoEqBands(double strength) const;
+
+    // Detected voice fundamental (Hz); 0 when unknown / not speech.
+    double voiceFundamentalHz() const { return voiceFundamentalHz_; }
     vc::SpectrumResult previewSpectrum(double noiseReductionAmount) const;
 
     bool hasAudio() const { return original_.numFrames() > 0; }
@@ -83,6 +86,12 @@ public:
     // Returns true only when it swaps in a newly-denoised profile.
     bool refreshVoiceProfileFromDenoised();
 
+    // Once the background model pass is complete, write the denoised audio to
+    // disk (16-bit) so the next load can skip denoising entirely. No-op if the
+    // audio was restored from cache, already written, or not yet complete.
+    // Returns true only on the tick it performs the write. Cheap to poll.
+    bool persistDenoisedAudioIfReady();
+
     // Integrated loudness of the (unprocessed) input, measured once at load.
     // May be -inf for silence.
     double inputLufs() const { return inputLufs_; }
@@ -100,6 +109,17 @@ public:
 
     double lastInputLufs() const { return lastInputLufs_; }
     double lastGainDb() const { return lastGainDb_; }
+
+    // Cached intensity loudness references (the loudness reaching the loudness
+    // stage at min/max intensity). Measuring these means two full offline chain
+    // renders of the whole file, so they are persisted with the analysis cache
+    // and reused on reload instead of recomputed. `hasIntensityLoudnessRefs()`
+    // is false until measured (or restored from cache).
+    bool hasIntensityLoudnessRefs() const { return hasIntensityRefs_; }
+    double intensityMinLoudnessRef() const { return intensityMinLoudnessRef_; }
+    double intensityMaxLoudnessRef() const { return intensityMaxLoudnessRef_; }
+    void setIntensityLoudnessRefs(double minRef, double maxRef);
+
     juce::var makeAnalysisCacheState() const;
     void setProjectAnalysisCache(const juce::var& state);
     void saveAnalysisCacheNow() const { saveAnalysisCache(); }
@@ -129,10 +149,15 @@ private:
     double musicMasterGainDb_ = 0.0;
     vc::SpectrumResult spectrum_;
     vc::SpectrumResult drySpectrum_;
+    double voiceFundamentalHz_ = 0.0;
     std::vector<vc::EqBand> autoEqBands_;
     bool voiceProfileUsesDenoised_ = false;
     double inputLufs_ = 0.0;
     double inputPeakDb_ = -120.0;
+    double intensityMinLoudnessRef_ = 0.0;
+    double intensityMaxLoudnessRef_ = 0.0;
+    bool hasIntensityRefs_ = false;
+    bool denoisedAudioSaved_ = false;
     double lastInputLufs_ = 0.0;
     double lastGainDb_ = 0.0;
     juce::var pendingProjectAnalysisCache_;

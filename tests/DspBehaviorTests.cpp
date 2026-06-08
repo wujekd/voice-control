@@ -2,12 +2,14 @@
 #include "Ducker.h"
 #include "Eq.h"
 #include "LoudnessNormalizer.h"
+#include "PitchDetector.h"
 #include "Presets.h"
 #include "SpectrumAnalyzer.h"
 #include "VoiceChain.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -93,6 +95,89 @@ bool expect(bool condition, const std::string& message) {
     if (!condition)
         std::cerr << "FAIL: " << message << "\n";
     return condition;
+}
+
+// A harmonic-rich periodic tone (decaying harmonics) at the given fundamental —
+// a stand-in for a voiced speech segment with a clear pitch.
+vc::AudioBuffer makeHarmonicTone(double f0Hz, double gain = 0.3,
+                                 int harmonics = 8, int sampleRate = 48000,
+                                 double seconds = 1.5) {
+    vc::AudioBuffer b;
+    b.sampleRate = sampleRate;
+    const std::size_t frames = static_cast<std::size_t>(seconds * sampleRate);
+    b.channels.assign(1, std::vector<float>(frames, 0.0f));
+    const double twoPi = 2.0 * 3.14159265358979323846;
+    for (std::size_t i = 0; i < frames; ++i) {
+        const double t = static_cast<double>(i) / sampleRate;
+        double s = 0.0;
+        for (int h = 1; h <= harmonics; ++h)
+            s += (1.0 / h) * std::sin(twoPi * f0Hz * h * t);
+        b.channels[0][i] = static_cast<float>(s * gain);
+    }
+    return b;
+}
+
+// A tone whose 2nd harmonic dominates the fundamental — the classic octave trap
+// that fools naive autocorrelation/FFT-peak pitch detectors.
+vc::AudioBuffer makeOctaveTrap(double f0Hz, double gain = 0.3,
+                               int sampleRate = 48000, double seconds = 1.5) {
+    vc::AudioBuffer b;
+    b.sampleRate = sampleRate;
+    const std::size_t frames = static_cast<std::size_t>(seconds * sampleRate);
+    b.channels.assign(1, std::vector<float>(frames, 0.0f));
+    const double twoPi = 2.0 * 3.14159265358979323846;
+    for (std::size_t i = 0; i < frames; ++i) {
+        const double t = static_cast<double>(i) / sampleRate;
+        const double fund = 0.4 * std::sin(twoPi * f0Hz * t);
+        const double second = 1.0 * std::sin(twoPi * 2.0 * f0Hz * t);
+        const double third = 0.6 * std::sin(twoPi * 3.0 * f0Hz * t);
+        b.channels[0][i] = static_cast<float>((fund + second + third) * gain);
+    }
+    return b;
+}
+
+vc::AudioBuffer makeWhiteNoise(double gain = 0.2, int sampleRate = 48000,
+                               double seconds = 1.5) {
+    vc::AudioBuffer b;
+    b.sampleRate = sampleRate;
+    const std::size_t frames = static_cast<std::size_t>(seconds * sampleRate);
+    b.channels.assign(1, std::vector<float>(frames, 0.0f));
+    std::uint32_t state = 0x12345678u;
+    for (std::size_t i = 0; i < frames; ++i) {
+        state = state * 1664525u + 1013904223u; // LCG
+        const double r = (state >> 8) / static_cast<double>(1u << 24) - 0.5;
+        b.channels[0][i] = static_cast<float>(r * 2.0 * gain);
+    }
+    return b;
+}
+
+// Frequency of the first band of the given type in a band list (0 if absent).
+double bandFreq(const std::vector<vc::EqBand>& bands, vc::EqBand::Type type) {
+    for (const auto& b : bands)
+        if (b.type == type)
+            return b.freq;
+    return 0.0;
+}
+
+// Flat spectrum with a strong boost below `edgeHz`, so the low and low-mid
+// windows read hot relative to the speech-core anchor for any layout — i.e. both
+// a low shelf and a low-mid peak get emitted, letting us assert their placement.
+vc::SpectrumResult makeLowHeavySpectrum(double edgeHz, double boostDb) {
+    vc::SpectrumResult s;
+    s.sampleRate = 48000.0;
+    s.fftSize = 4096;
+    s.valid = true;
+    const int bins = s.fftSize / 2;
+    s.binPower.assign(static_cast<std::size_t>(bins), 1.0);
+    s.binDb.assign(static_cast<std::size_t>(bins), 0.0f);
+    const double binHz = s.sampleRate / s.fftSize;
+    const int hi = std::min(bins - 1, static_cast<int>(edgeHz / binHz));
+    const double power = std::pow(10.0, boostDb / 10.0);
+    for (int k = 1; k <= hi; ++k) {
+        s.binPower[static_cast<std::size_t>(k)] = power;
+        s.binDb[static_cast<std::size_t>(k)] = static_cast<float>(boostDb);
+    }
+    return s;
 }
 
 // Drives a single-channel Ducker with a steady tone (the "music") and a
@@ -213,6 +298,37 @@ int main() {
                  "clean dull vocal may receive a presence boost");
     ok &= expect(presenceBoost(harshEq) < 1.0,
                  "presence boost should be suppressed when dry signal already has harsh upper-mid energy");
+
+    // ---- Voice fundamental (pitch) detection ----
+    const auto malePitch = vc::PitchDetector::detectFundamental(makeHarmonicTone(120.0));
+    ok &= expect(malePitch.valid && std::fabs(malePitch.f0Hz - 120.0) < 4.0,
+                 "YIN should detect a 120 Hz fundamental within a few Hz");
+
+    const auto femalePitch = vc::PitchDetector::detectFundamental(makeHarmonicTone(220.0));
+    ok &= expect(femalePitch.valid && std::fabs(femalePitch.f0Hz - 220.0) < 6.0,
+                 "YIN should detect a 220 Hz fundamental within a few Hz");
+
+    const auto trapPitch = vc::PitchDetector::detectFundamental(makeOctaveTrap(150.0));
+    ok &= expect(trapPitch.valid && std::fabs(trapPitch.f0Hz - 150.0) < 8.0,
+                 "YIN should track the true fundamental despite a dominant 2nd harmonic (no octave jump)");
+
+    const auto noisePitch = vc::PitchDetector::detectFundamental(makeWhiteNoise());
+    ok &= expect(!noisePitch.valid,
+                 "white noise should not yield a confident fundamental");
+
+    // ---- F0-relative auto-EQ placement ----
+    const auto lowHeavy = makeLowHeavySpectrum(900.0, 8.0);
+    const auto fixedBands = vc::computeAutoEqBands(lowHeavy, 1.0, 0.0);
+    ok &= expect(std::fabs(bandFreq(fixedBands, vc::EqBand::Type::LowShelf) - 200.0) < 1.0,
+                 "f0=0 keeps the legacy 200 Hz low shelf");
+    ok &= expect(std::fabs(bandFreq(fixedBands, vc::EqBand::Type::Peak) - 320.0) < 1.0,
+                 "f0=0 keeps the legacy 320 Hz low-mid peak");
+
+    const auto pitchedBands = vc::computeAutoEqBands(lowHeavy, 1.0, 220.0);
+    ok &= expect(std::fabs(bandFreq(pitchedBands, vc::EqBand::Type::LowShelf) - 220.0) < 1.0,
+                 "a 220 Hz fundamental places the low shelf at the fundamental");
+    ok &= expect(std::fabs(bandFreq(pitchedBands, vc::EqBand::Type::Peak) - 550.0) < 1.0,
+                 "a 220 Hz fundamental places the low-mid peak near the 2nd-3rd harmonic (~2.5x)");
 
     // ---- Background music ducking ----
     const double unityRms = 1.0 / std::sqrt(2.0); // RMS of a unit-amplitude sine

@@ -76,10 +76,10 @@ Two things to hold onto from the start:
 ```mermaid
 flowchart LR
     SRC["Source file<br/>video or audio"] -->|"FFmpeg decode"| ORIG["original buffer<br/>48 kHz"]
-    ORIG --> ANA["Analyse:<br/>LUFS, peak,<br/>dry spectrum,<br/>waveform peaks"]
+    ORIG --> ANA["Analyse:<br/>LUFS, peak,<br/>dry spectrum, F0,<br/>waveform peaks"]
     ORIG --> DENO["Background denoise<br/>DeepFilterNet3"]
-    ANA --> EQ0["auto-EQ from<br/>dry spectrum"]
-    DENO --> PROF["denoised voice<br/>profile"]
+    ANA --> EQ0["auto-EQ from<br/>dry spectrum + F0"]
+    DENO --> PROF["denoised voice<br/>profile + F0"]
     PROF --> EQ1["noise-aware<br/>auto-EQ"]
 
     ORIG --> BLEND
@@ -100,7 +100,7 @@ result = VoiceChain( blend(original, denoised, amount) ) + music
 | Phase | Where | Cost | Notes |
 |---|---|---|---|
 | Decode | `loadMedia` → FFmpeg | slow | always to 48 kHz WAV via temp file |
-| Analyse | `loadMedia` | medium | LUFS, peak, dry spectrum, peaks; cached |
+| Analyse | `loadMedia` | medium | LUFS, peak, dry spectrum, F0, peaks; cached |
 | Denoise | `DenoiseStreamer` | background | faster-than-real-time, playhead-first |
 | Profile swap | `refreshVoiceProfileFromDenoised` | medium | re-measures spectrum from denoised |
 | Render | `process` / `LiveVoiceChain` | fast | blend → chain → music |
@@ -199,6 +199,23 @@ is compared against a fixed **target balance** for clean speech:
 | presence | 3000–6000 | −3 | peak @ 4000, Q 0.9 |
 | air | 8000–14000 | −10 | high shelf @ 8000 |
 
+**Pitch-adaptive low end.** The regions and frequencies above are the *fallback*
+layout. When the voice fundamental **F0** is known (see §4.7), the low and mud
+bands track the speaker's pitch instead of assuming a fixed (male) range — both
+the **measurement windows** and the **band placement** are derived from F0 by
+`layoutFor(f0)` in [`core/Eq.cpp`](../core/Eq.cpp):
+
+| Band | Measurement window | Placement |
+|---|---|---|
+| low | 0.6–1.4 × F0 (fundamental) | low shelf @ F0 (clamped 80–300 Hz) |
+| mud | 1.8–3.5 × F0 (2nd–3rd harmonic) | peak @ 2.5 × F0 (clamped 250–900 Hz) |
+| anchor | max(300, 1.5 × F0) – 3500 | — |
+
+Presence and air stay fixed. `f0 = 0` reproduces the legacy fixed layout exactly,
+so non-speech material and detection failures never regress. This is what keeps a
+higher-pitched (e.g. female) voice's fundamental out of the mud peak and prevents
+the empty sub-fundamental region from being boosted.
+
 ### 4.2 Per-band decision — single-spectrum path
 
 `computeAutoEqBands` (used before denoise completes, dry spectrum only):
@@ -295,6 +312,22 @@ mud trim + air boost. `fullEqBands()` concatenates auto-EQ then tone.
 `strength` (0..1) scales the whole corrective curve, set from Intensity via
 `applyIntensity`: `baseAutoEqStrength = 0.25 + 0.35 · intensity`. Default
 load-time strength is 0.6.
+
+### 4.7 Voice fundamental (F0) detection
+
+`vc::PitchDetector::detectFundamental` ([`core/PitchDetector.cpp`](../core/PitchDetector.cpp))
+estimates the speaking pitch that drives the pitch-adaptive layout in §4.1. It
+runs **YIN** per frame (difference function → cumulative mean normalized
+difference → absolute threshold → parabolic interpolation) and takes the
+**median F0 over voiced frames**. The CMND step plus the median make it resistant
+to the octave jumps that fool raw autocorrelation/FFT-peak detection.
+
+`ProcessingEngine` estimates F0 from the **dry** signal at load as a stop-gap,
+then re-estimates from the **denoised (speech-only)** buffer once the background
+pass finishes — mirroring how the auto-EQ source spectrum is upgraded. The result
+is cached (`voiceFundamentalHz`, analysis cache v3). Low-confidence files (music,
+noise) yield `valid = false`, leaving F0 at 0 and the auto-EQ on its fixed
+fallback layout.
 
 ---
 
@@ -450,7 +483,7 @@ without re-running the model:
 ```mermaid
 flowchart LR
     KEY["path + sizeBytes + modifiedMs<br/>+ schemaVersion"] --> VALID{"cache valid?"}
-    VALID -->|"yes"| LOAD["load LUFS, peak,<br/>both spectra, waveform peaks"]
+    VALID -->|"yes"| LOAD["load LUFS, peak,<br/>both spectra, F0, waveform peaks"]
     VALID -->|"no"| COMPUTE["measure + analyse + save"]
     LOAD --> READY["prepared"]
     COMPUTE --> READY
@@ -458,8 +491,19 @@ flowchart LR
 
 Schema-versioned JSON keyed by path + size + mtime
 ([`ProcessingEngine.cpp`](../desktop-juce/ProcessingEngine.cpp),
-`kAnalysisCacheVersion`). Stores derived analysis only — never heavy denoised or
-processed audio buffers. Invalidated on identity, mtime, or schema change.
+`kAnalysisCacheVersion`). The JSON stores derived analysis: both spectra, F0,
+LUFS/peak, waveform peaks, and the **intensity loudness references** (which
+otherwise cost two full offline chain renders per load). Invalidated on identity,
+mtime, or schema change.
+
+**Denoised-audio cache.** The neural denoise is the heaviest per-load cost, so
+the completed denoised buffer is also persisted — as a sibling 16-bit WAV
+(`<hash>.denoised.wav`) written by `persistDenoisedAudioIfReady()` once the
+background pass finishes. On reload, when the metadata cache validates the file
+identity, the WAV is read straight into the `DenoiseStreamer` via
+`loadPrecomputed()` (all hops marked valid, no model run). A geometry mismatch or
+missing file falls back to a fresh denoise. This is the one cache entry that
+holds bulk audio rather than derived metadata.
 
 ---
 

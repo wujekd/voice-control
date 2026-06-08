@@ -14,13 +14,37 @@ struct BalanceBands {
     double airRel = 0.0;
 };
 
-BalanceBands measureBalanceBands(const SpectrumResult& spectrum) {
-    const double anchor = spectrum.bandDb(300.0, 3000.0);
+// Where the low/low-mid bands are measured and placed. Derived from the voice
+// fundamental when known; falls back to the legacy fixed layout otherwise.
+struct BalanceLayout {
+    double lowLo, lowHi;       // low-energy (fundamental) measurement window
+    double mudLo, mudHi;       // low-mid (2nd-3rd harmonic) measurement window
+    double anchorLo, anchorHi; // speech-core reference window
+    double lowShelfFreq;       // low shelf placement
+    double mudPeakFreq;        // low-mid peak placement
+};
+
+BalanceLayout layoutFor(double f0) {
+    if (f0 <= 0.0)
+        return { 60.0, 200.0, 200.0, 450.0, 300.0, 3000.0, 200.0, 320.0 };
+
+    const double low = std::clamp(f0, 80.0, 300.0);
     return {
-        spectrum.bandDb(60.0, 200.0)     - anchor,
-        spectrum.bandDb(200.0, 450.0)    - anchor,
-        spectrum.bandDb(3000.0, 6000.0)  - anchor,
-        spectrum.bandDb(8000.0, 14000.0) - anchor,
+        0.6 * low, 1.4 * low,                 // fundamental region
+        1.8 * low, 3.5 * low,                 // 2nd-3rd harmonic region
+        std::max(300.0, 1.5 * low), 3500.0,   // keep the anchor above the fundamental
+        low,                                  // low shelf at the fundamental
+        std::clamp(2.5 * low, 250.0, 900.0),  // low-mid peak near the harmonics
+    };
+}
+
+BalanceBands measureBalanceBands(const SpectrumResult& spectrum, const BalanceLayout& layout) {
+    const double anchor = spectrum.bandDb(layout.anchorLo, layout.anchorHi);
+    return {
+        spectrum.bandDb(layout.lowLo, layout.lowHi)   - anchor,
+        spectrum.bandDb(layout.mudLo, layout.mudHi)   - anchor,
+        spectrum.bandDb(3000.0, 6000.0)               - anchor,
+        spectrum.bandDb(8000.0, 14000.0)              - anchor,
     };
 }
 
@@ -57,13 +81,14 @@ std::vector<EqBand> toneAmountBands(double amount) {
     };
 }
 
-std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength) {
+std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength, double f0) {
     std::vector<EqBand> bands;
     if (!spectrum.valid) return bands;
 
     strength = std::clamp(strength, 0.0, 1.0);
 
-    const auto balance = measureBalanceBands(spectrum);
+    const auto layout = layoutFor(f0);
+    const auto balance = measureBalanceBands(spectrum, layout);
 
     // Target balance for clean speech (relative to anchor). Favour low-end
     // control; high bands sit naturally well below the anchor.
@@ -87,27 +112,28 @@ std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double st
             bands.push_back({ type, freq, gain, q });
     };
 
-    add(EqBand::Type::LowShelf,  200.0,  0.7071, balance.lowRel,  lowTarget);
-    add(EqBand::Type::Peak,      320.0,  0.9,    balance.mudRel,  mudTarget);
-    add(EqBand::Type::Peak,      4000.0, 0.9,    balance.presRel, presTarget);
-    add(EqBand::Type::HighShelf, 8000.0, 0.7071, balance.airRel,  airTarget);
+    add(EqBand::Type::LowShelf,  layout.lowShelfFreq, 0.7071, balance.lowRel,  lowTarget);
+    add(EqBand::Type::Peak,      layout.mudPeakFreq,  0.9,    balance.mudRel,  mudTarget);
+    add(EqBand::Type::Peak,      4000.0,              0.9,    balance.presRel, presTarget);
+    add(EqBand::Type::HighShelf, 8000.0,              0.7071, balance.airRel,  airTarget);
 
     return bands;
 }
 
 std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpectrum,
                                                  const SpectrumResult& drySpectrum,
-                                                 double strength) {
+                                                 double strength, double f0) {
     if (!voiceSpectrum.valid)
-        return computeAutoEqBands(drySpectrum, strength);
+        return computeAutoEqBands(drySpectrum, strength, f0);
     if (!drySpectrum.valid)
-        return computeAutoEqBands(voiceSpectrum, strength);
+        return computeAutoEqBands(voiceSpectrum, strength, f0);
 
     std::vector<EqBand> bands;
     strength = std::clamp(strength, 0.0, 1.0);
 
-    const auto voice = measureBalanceBands(voiceSpectrum);
-    const auto dry = measureBalanceBands(drySpectrum);
+    const auto layout = layoutFor(f0);
+    const auto voice = measureBalanceBands(voiceSpectrum, layout);
+    const auto dry = measureBalanceBands(drySpectrum, layout);
 
     constexpr double lowTarget  = -2.0;
     constexpr double mudTarget  = -1.0;
@@ -156,10 +182,10 @@ std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpec
             bands.push_back({ type, freq, gain, q });
     };
 
-    add(EqBand::Type::LowShelf,  200.0,  0.7071, voice.lowRel,  dry.lowRel,  lowTarget,  false);
-    add(EqBand::Type::Peak,      320.0,  0.9,    voice.mudRel,  dry.mudRel,  mudTarget,  false);
-    add(EqBand::Type::Peak,      4000.0, 0.9,    voice.presRel, dry.presRel, presTarget, true);
-    add(EqBand::Type::HighShelf, 8000.0, 0.7071, voice.airRel,  dry.airRel,  airTarget,  true);
+    add(EqBand::Type::LowShelf,  layout.lowShelfFreq, 0.7071, voice.lowRel,  dry.lowRel,  lowTarget,  false);
+    add(EqBand::Type::Peak,      layout.mudPeakFreq,  0.9,    voice.mudRel,  dry.mudRel,  mudTarget,  false);
+    add(EqBand::Type::Peak,      4000.0,              0.9,    voice.presRel, dry.presRel, presTarget, true);
+    add(EqBand::Type::HighShelf, 8000.0,              0.7071, voice.airRel,  dry.airRel,  airTarget,  true);
 
     return bands;
 }

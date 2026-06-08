@@ -3,6 +3,7 @@
 #include "Denoiser.h"           // vc::Denoiser::findDefaultModel
 #include "FFmpeg.h"             // vc::FFmpeg
 #include "LoudnessNormalizer.h" // vc::LoudnessNormalizer (input measurement)
+#include "PitchDetector.h"      // vc::PitchDetector (voice fundamental)
 #include "SpectrumAnalyzer.h"   // vc::SpectrumAnalyzer
 #include "VoiceChain.h"         // vc::VoiceChain
 #include "WavIo.h"              // vc::readWav / writeWavFloat32
@@ -14,7 +15,7 @@
 #include <memory>
 
 namespace {
-constexpr int kAnalysisCacheVersion = 2;
+constexpr int kAnalysisCacheVersion = 3;
 
 bool extensionIsVideo(const juce::File& f) {
     static const juce::StringArray video { "mp4", "mov", "m4v", "mkv", "avi", "webm" };
@@ -27,6 +28,14 @@ juce::File cacheFileFor(const juce::File& source) {
         .getChildFile("AnalysisCache");
     dir.createDirectory();
     return dir.getChildFile(juce::String::toHexString(source.getFullPathName().hashCode64()) + ".json");
+}
+
+juce::File denoisedCacheFileFor(const juce::File& source) {
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Voice Control")
+        .getChildFile("AnalysisCache");
+    dir.createDirectory();
+    return dir.getChildFile(juce::String::toHexString(source.getFullPathName().hashCode64()) + ".denoised.wav");
 }
 
 juce::var floatVectorToVar(const std::vector<float>& values) {
@@ -170,6 +179,13 @@ bool ProcessingEngine::applyAnalysisCacheState(const juce::var& state, const juc
     inputPeakDb_ = static_cast<double>(root->getProperty("inputPeakDb"));
     drySpectrum_ = varToSpectrum(root->getProperty("drySpectrum"));
     spectrum_ = varToSpectrum(root->getProperty("activeSpectrum"));
+    voiceFundamentalHz_ = static_cast<double>(root->getProperty("voiceFundamentalHz"));
+    hasIntensityRefs_ = root->hasProperty("intensityMinLoudnessRef")
+                     && root->hasProperty("intensityMaxLoudnessRef");
+    if (hasIntensityRefs_) {
+        intensityMinLoudnessRef_ = static_cast<double>(root->getProperty("intensityMinLoudnessRef"));
+        intensityMaxLoudnessRef_ = static_cast<double>(root->getProperty("intensityMaxLoudnessRef"));
+    }
     voiceProfileUsesDenoised_ = static_cast<bool>(root->getProperty("voiceProfileUsesDenoised"));
     voiceWaveformPeaks_ = varToFloatVector(root->getProperty("voiceWaveformPeaks"));
     processedVoiceWaveformPeaks_ = varToFloatVector(root->getProperty("processedVoiceWaveformPeaks"));
@@ -213,6 +229,11 @@ juce::var ProcessingEngine::makeAnalysisCacheState() const {
     root->setProperty("inputPeakDb", inputPeakDb_);
     root->setProperty("drySpectrum", spectrumToVar(drySpectrum_));
     root->setProperty("activeSpectrum", spectrumToVar(spectrum_));
+    root->setProperty("voiceFundamentalHz", voiceFundamentalHz_);
+    if (hasIntensityRefs_) {
+        root->setProperty("intensityMinLoudnessRef", intensityMinLoudnessRef_);
+        root->setProperty("intensityMaxLoudnessRef", intensityMaxLoudnessRef_);
+    }
     root->setProperty("voiceProfileUsesDenoised", voiceProfileUsesDenoised_);
     root->setProperty("voiceWaveformPeaks", floatVectorToVar(voiceWaveformPeaks_));
     root->setProperty("processedVoiceWaveformPeaks", floatVectorToVar(processedVoiceWaveformPeaks_));
@@ -221,6 +242,15 @@ juce::var ProcessingEngine::makeAnalysisCacheState() const {
 
 void ProcessingEngine::setProjectAnalysisCache(const juce::var& state) {
     pendingProjectAnalysisCache_ = state;
+}
+
+void ProcessingEngine::setIntensityLoudnessRefs(double minRef, double maxRef) {
+    intensityMinLoudnessRef_ = minRef;
+    intensityMaxLoudnessRef_ = maxRef;
+    hasIntensityRefs_ = true;
+    // Fold the freshly-measured refs into the on-disk cache so the next load can
+    // skip the two offline chain passes.
+    saveAnalysisCache();
 }
 
 void ProcessingEngine::saveAnalysisCache() const {
@@ -323,14 +353,46 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
         drySpectrum_ = vc::SpectrumAnalyzer::analyze(original_, 12);
         spectrum_ = drySpectrum_;
         voiceProfileUsesDenoised_ = false;
+        hasIntensityRefs_ = false; // measured by the caller, then cached
+
+
+
+        // Estimate the fundamental from the dry signal as a stop-gap; the denoised
+        // (speech-only) estimate replaces it once the background pass completes.
+        const auto pitch = vc::PitchDetector::detectFundamental(original_);
+        voiceFundamentalHz_ = pitch.valid ? pitch.f0Hz : 0.0;
+
         autoEqBands_ = autoEqBands(0.6);
         saveAnalysisCache();
     }
 
-    // Kick off the in-process neural denoise in the background. Playback can
-    // start immediately on the dry signal; the denoised version fills in (faster
-    // than real time) and is blended live per the noise-reduction amount.
-    streamer_.start(original_, vc::Denoiser::findDefaultModel());
+    // Restore the denoised audio from disk if a matching cache exists, so the
+    // neural pass doesn't re-run on every reopen. Gated on a validated metadata
+    // cache (same path/size/mtime) that already reported a denoised profile.
+    bool denoisedRestored = false;
+    if (cacheLoaded && voiceProfileUsesDenoised_) {
+        const auto dn = denoisedCacheFileFor(media);
+        if (dn.existsAsFile()) {
+            try {
+                vc::AudioBuffer cached = vc::readWav(dn.getFullPathName().toStdString());
+                denoisedRestored = streamer_.loadPrecomputed(original_, cached);
+            } catch (const std::exception&) {
+                denoisedRestored = false;
+            }
+        }
+    }
+
+    // Otherwise kick off the in-process neural denoise in the background.
+    // Playback can start immediately on the dry signal; the denoised version
+    // fills in (faster than real time) and is blended live per the
+    // noise-reduction amount. The completed pass is cached by
+    // refreshVoiceProfileFromDenoised().
+    if (!denoisedRestored)
+        streamer_.start(original_, vc::Denoiser::findDefaultModel());
+
+    // If restored from disk it is already cached; otherwise the completed model
+    // pass is captured by persistDenoisedAudioIfReady().
+    denoisedAudioSaved_ = denoisedRestored;
 
     processedReady_ = false;
     return true;
@@ -353,6 +415,11 @@ void ProcessingEngine::clear() {
     musicMasterGainDb_ = 0.0;
     spectrum_ = {};
     drySpectrum_ = {};
+    voiceFundamentalHz_ = 0.0;
+    intensityMinLoudnessRef_ = 0.0;
+    intensityMaxLoudnessRef_ = 0.0;
+    hasIntensityRefs_ = false;
+    denoisedAudioSaved_ = false;
     autoEqBands_.clear();
     voiceProfileUsesDenoised_ = false;
     inputLufs_ = 0.0;
@@ -375,8 +442,8 @@ float ProcessingEngine::waveformDisplayGain() const {
 
 std::vector<vc::EqBand> ProcessingEngine::autoEqBands(double strength) const {
     if (voiceProfileUsesDenoised_)
-        return vc::computeNoiseAwareAutoEqBands(spectrum_, drySpectrum_, strength);
-    return vc::computeAutoEqBands(spectrum_, strength);
+        return vc::computeNoiseAwareAutoEqBands(spectrum_, drySpectrum_, strength, voiceFundamentalHz_);
+    return vc::computeAutoEqBands(spectrum_, strength, voiceFundamentalHz_);
 }
 
 vc::SpectrumResult ProcessingEngine::previewSpectrum(double noiseReductionAmount) const {
@@ -411,9 +478,38 @@ bool ProcessingEngine::refreshVoiceProfileFromDenoised() {
     spectrum_ = vc::SpectrumAnalyzer::analyze(denoised, 12);
     voiceProfileUsesDenoised_ = spectrum_.valid;
     processedVoiceWaveformPeaks_ = computeWaveformPeaks(denoised, 2048);
+
+    // Authoritative pitch from the speech-only buffer; keep the dry estimate if
+    // the denoised pass can't find a confident fundamental.
+    const auto pitch = vc::PitchDetector::detectFundamental(denoised);
+    if (pitch.valid)
+        voiceFundamentalHz_ = pitch.f0Hz;
+
     autoEqBands_ = autoEqBands(0.6);
     saveAnalysisCache();
     return voiceProfileUsesDenoised_;
+}
+
+bool ProcessingEngine::persistDenoisedAudioIfReady() {
+    // Already cached (restored from disk or written earlier), nothing in flight,
+    // or no model pass to capture.
+    if (denoisedAudioSaved_ || sourceFile_ == juce::File() || !streamer_.isComplete())
+        return false;
+
+    const auto& denoised = streamer_.denoised();
+    if (denoised.numFrames() == 0)
+        return false;
+
+    // Set the flag regardless of outcome so a failing write doesn't retry every
+    // timer tick; a missing cache just means we re-denoise on the next load.
+    denoisedAudioSaved_ = true;
+    try {
+        vc::writeWavPcm16(denoisedCacheFileFor(sourceFile_).getFullPathName().toStdString(),
+                          denoised);
+    } catch (const std::exception&) {
+        return false;
+    }
+    return true;
 }
 
 bool ProcessingEngine::addMusicClip(const juce::File& audioFile, juce::String& error) {

@@ -46,6 +46,36 @@ void DenoiseStreamer::start(const AudioBuffer& source, const std::string& modelP
     worker_ = std::thread([this] { workerLoop(); });
 }
 
+bool DenoiseStreamer::loadPrecomputed(const AudioBuffer& source, const AudioBuffer& denoised) {
+    stop();
+
+    channels_ = std::max(1, source.numChannels());
+    numFrames_ = static_cast<std::int64_t>(source.numFrames());
+    hop_ = kHopFallback;
+    numHops_ = numFrames_ > 0
+        ? static_cast<int>((numFrames_ + hop_ - 1) / hop_)
+        : 0;
+
+    // The cached buffer must match the freshly-decoded source, else bail so the
+    // caller runs the model.
+    if (denoised.numChannels() != channels_
+        || static_cast<std::int64_t>(denoised.numFrames()) != numFrames_)
+        return false;
+
+    denoised_ = denoised;
+    denoised_.sampleRate = source.sampleRate;
+    validHops_ = std::vector<std::atomic<std::uint8_t>>(static_cast<std::size_t>(numHops_));
+    for (auto& v : validHops_)
+        v.store(1, std::memory_order_release);
+
+    stop_.store(false);
+    modelReady_.store(true, std::memory_order_release);
+    playheadFrame_.store(0);
+    remaining_.store(0);
+    active_.store(false, std::memory_order_release);
+    return true;
+}
+
 void DenoiseStreamer::stop() {
     if (worker_.joinable()) {
         {

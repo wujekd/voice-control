@@ -26,7 +26,14 @@ std::vector<EqBand> toneAmountBands(double amount);
 // low / low-mid / presence / air regions against the speech "core" band,
 // favouring low-end control. `strength` (0..1) scales how much of the computed
 // correction is applied. Returns only bands that move meaningfully.
-std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength = 0.7);
+//
+// `f0` is the detected voice fundamental (Hz); when > 0 the low shelf and
+// low-mid peak — and the windows used to measure them — track the speaker's
+// pitch instead of assuming a fixed (male) range. f0 <= 0 reproduces the legacy
+// fixed-frequency behaviour, used as a fallback for non-speech or when pitch
+// detection fails.
+std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum,
+                                       double strength = 0.7, double f0 = 0.0);
 
 // Noise-aware variant for when both the original and denoised voice profiles
 // are available. The denoised profile drives vocal correction intent, while
@@ -34,7 +41,7 @@ std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double st
 // the user lowers the noise-reduction blend.
 std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpectrum,
                                                  const SpectrumResult& drySpectrum,
-                                                 double strength = 0.7);
+                                                 double strength = 0.7, double f0 = 0.0);
 
 // Configure a biquad from a band.
 void configureBiquad(Biquad& bq, const EqBand& band, double sampleRate);

@@ -1,5 +1,6 @@
 #include "WavIo.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -134,6 +135,48 @@ void writeWavFloat32(const std::string& path, const AudioBuffer& buffer) {
             unsigned char b[4] = {(unsigned char)(bits), (unsigned char)(bits >> 8),
                                   (unsigned char)(bits >> 16), (unsigned char)(bits >> 24)};
             out.write(reinterpret_cast<char*>(b), 4);
+        }
+    }
+    if (!out) throw std::runtime_error("writeWav: write failed for " + path);
+}
+
+void writeWavPcm16(const std::string& path, const AudioBuffer& buffer) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) throw std::runtime_error("writeWav: cannot open " + path);
+
+    const uint16_t numChannels = static_cast<uint16_t>(buffer.numChannels());
+    const uint32_t sampleRate = static_cast<uint32_t>(buffer.sampleRate);
+    const uint16_t bitsPerSample = 16;
+    const uint16_t bytesPerSample = bitsPerSample / 8;
+    const std::size_t frames = buffer.numFrames();
+    const uint32_t dataLen = static_cast<uint32_t>(frames * numChannels * bytesPerSample);
+    const uint16_t blockAlign = numChannels * bytesPerSample;
+    const uint32_t byteRate = sampleRate * blockAlign;
+
+    out.write("RIFF", 4);
+    writeU32(out, 36 + dataLen);
+    out.write("WAVE", 4);
+
+    out.write("fmt ", 4);
+    writeU32(out, 16);
+    writeU16(out, 1); // PCM
+    writeU16(out, numChannels);
+    writeU32(out, sampleRate);
+    writeU32(out, byteRate);
+    writeU16(out, blockAlign);
+    writeU16(out, bitsPerSample);
+
+    out.write("data", 4);
+    writeU32(out, dataLen);
+
+    for (std::size_t f = 0; f < frames; ++f) {
+        for (uint16_t ch = 0; ch < numChannels; ++ch) {
+            float v = buffer.channels[ch][f];
+            v = v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v);
+            int32_t s = static_cast<int32_t>(std::lround(v * 32767.0f));
+            if (s < -32768) s = -32768;
+            if (s > 32767) s = 32767;
+            writeU16(out, static_cast<uint16_t>(static_cast<int16_t>(s)));
         }
     }
     if (!out) throw std::runtime_error("writeWav: write failed for " + path);

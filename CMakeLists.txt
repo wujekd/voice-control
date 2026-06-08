@@ -17,6 +17,7 @@ add_library(vc_core STATIC
     core/LiveLimiter.cpp
     core/LiveVoiceChain.cpp
     core/LoudnessNormalizer.cpp
+    core/PitchDetector.cpp
     core/SpectrumAnalyzer.cpp
     core/VoiceChain.cpp
     core/WavIo.cpp
