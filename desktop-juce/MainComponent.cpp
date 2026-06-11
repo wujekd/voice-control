@@ -1138,6 +1138,12 @@ void MainComponent::openSettings() {
 
     auto content = std::make_unique<SettingsComponent>();
     content->setProjectInfo(buildProjectInfoText());
+    {
+        juce::String version = "0.1.0";
+        if (auto* app = juce::JUCEApplication::getInstance())
+            version = app->getApplicationVersion();
+        content->setAboutInfo(version);
+    }
     content->setGeneralControls(musicSectionModeLabel_, musicSectionModeBox_,
                                 followSystemButton_, outputDeviceLabel_, outputDeviceBox_);
     content->setProControls({

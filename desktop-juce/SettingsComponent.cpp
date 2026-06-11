@@ -9,6 +9,7 @@ SettingsComponent::SettingsComponent() {
     tabs_.addTab("General", pageColour, &generalPage_, false);
     tabs_.addTab("Project", pageColour, &projectPage_, false);
     tabs_.addTab("Pro", pageColour, &proPage_, false);
+    tabs_.addTab("About", pageColour, &aboutPage_, false);
     tabs_.setCurrentTabIndex(0); // General is the default tab
     addAndMakeVisible(tabs_);
 
@@ -32,6 +33,118 @@ SettingsComponent::SettingsComponent() {
 
 void SettingsComponent::setProjectInfo(const juce::String& text) {
     projectInfo_.setText(text, juce::dontSendNotification);
+}
+
+void SettingsComponent::setAboutInfo(const juce::String& version) {
+    const auto dim = juce::Colours::white.withAlpha(0.55f);
+    const auto bright = juce::Colours::white.withAlpha(0.85f);
+
+    aboutTitle_.setText("Voice Control " + version, juce::dontSendNotification);
+    aboutTitle_.setFont(juce::Font(juce::FontOptions(16.0f, juce::Font::bold)));
+    aboutTitle_.setColour(juce::Label::textColourId, bright);
+
+    aboutBlurb_.setText("Clean up voice recordings and add background music, "
+                        "then export back to audio or video.",
+                        juce::dontSendNotification);
+    aboutBlurb_.setFont(juce::Font(juce::FontOptions(13.0f)));
+    aboutBlurb_.setColour(juce::Label::textColourId, dim);
+    aboutBlurb_.setJustificationType(juce::Justification::topLeft);
+
+    creditsHeader_.setText("CREDITS", juce::dontSendNotification);
+    creditsHeader_.setFont(juce::Font(juce::FontOptions(11.0f, juce::Font::bold)));
+    creditsHeader_.setColour(juce::Label::textColourId, dim);
+
+    aboutLicenseNote_.setText("Bundled under their respective open-source "
+                              "licenses. See the included third-party license "
+                              "file for full terms.",
+                              juce::dontSendNotification);
+    aboutLicenseNote_.setFont(juce::Font(juce::FontOptions(11.0f)));
+    aboutLicenseNote_.setColour(juce::Label::textColourId,
+                                juce::Colours::white.withAlpha(0.4f));
+    aboutLicenseNote_.setJustificationType(juce::Justification::topLeft);
+
+    for (auto* c : { static_cast<juce::Component*>(&aboutTitle_),
+                     static_cast<juce::Component*>(&aboutBlurb_),
+                     static_cast<juce::Component*>(&aboutSeparator_),
+                     static_cast<juce::Component*>(&creditsHeader_),
+                     static_cast<juce::Component*>(&aboutLicenseNote_) })
+        aboutPage_.addAndMakeVisible(*c);
+
+    // One row per bundled third-party work: what it is, where it lives, and the
+    // license it ships under.
+    struct CreditSpec {
+        const char* title;
+        const char* detail;
+        const char* linkText;
+        const char* url;
+    };
+    const CreditSpec specs[] = {
+        { "Noise reduction — DeepFilterNet",
+          "Real-time speech enhancement by H. Schröter et al.  ·  MIT / Apache-2.0",
+          "github.com/Rikorose/DeepFilterNet",
+          "https://github.com/Rikorose/DeepFilterNet" },
+        { "Audio app framework — JUCE",
+          "UI and audio engine  ·  juce.com",
+          "juce.com",
+          "https://juce.com" },
+        { "Audio/video I/O — FFmpeg",
+          "Media import and export  ·  ffmpeg.org",
+          "ffmpeg.org",
+          "https://ffmpeg.org" },
+    };
+
+    creditRows_.clear();
+    for (const auto& spec : specs) {
+        CreditRow row;
+
+        row.title = std::make_unique<juce::Label>();
+        row.title->setText(spec.title, juce::dontSendNotification);
+        row.title->setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::bold)));
+        row.title->setColour(juce::Label::textColourId, bright);
+        aboutPage_.addAndMakeVisible(*row.title);
+
+        row.detail = std::make_unique<juce::Label>();
+        row.detail->setText(spec.detail, juce::dontSendNotification);
+        row.detail->setFont(juce::Font(juce::FontOptions(11.0f)));
+        row.detail->setColour(juce::Label::textColourId, dim);
+        aboutPage_.addAndMakeVisible(*row.detail);
+
+        row.link = std::make_unique<juce::HyperlinkButton>(
+            spec.linkText, juce::URL(spec.url));
+        row.link->setFont(juce::Font(juce::FontOptions(12.0f)), false,
+                          juce::Justification::centredLeft);
+        row.link->setColour(juce::HyperlinkButton::textColourId,
+                            juce::Colour(0xff5aa9ff));
+        aboutPage_.addAndMakeVisible(*row.link);
+
+        creditRows_.push_back(std::move(row));
+    }
+
+    aboutPage_.layout = [this](juce::Rectangle<int> r) {
+        r.reduce(16, 16);
+
+        aboutTitle_.setBounds(r.removeFromTop(22));
+        r.removeFromTop(4);
+        aboutBlurb_.setBounds(r.removeFromTop(34));
+
+        r.removeFromTop(12);
+        aboutSeparator_.setBounds(r.removeFromTop(1));
+        r.removeFromTop(12);
+
+        creditsHeader_.setBounds(r.removeFromTop(16));
+        r.removeFromTop(6);
+
+        for (auto& row : creditRows_) {
+            row.title->setBounds(r.removeFromTop(18));
+            row.detail->setBounds(r.removeFromTop(15));
+            row.link->setBounds(r.removeFromTop(18));
+            r.removeFromTop(10);
+        }
+
+        r.removeFromTop(4);
+        aboutLicenseNote_.setBounds(r.removeFromTop(34));
+    };
+    aboutPage_.resized();
 }
 
 void SettingsComponent::setGeneralControls(juce::Label& musicModeLabel,

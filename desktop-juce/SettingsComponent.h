@@ -36,6 +36,12 @@ public:
     // controls.
     void setProjectInfo(const juce::String& text);
 
+    // About tab: app name/version, a short blurb, and credits/attribution for
+    // the bundled third-party works (DeepFilterNet, JUCE, FFmpeg) with clickable
+    // links. Owned here, like the Project tab. Call once with the running
+    // version string.
+    void setAboutInfo(const juce::String& version);
+
     void resized() override;
 
     // Natural size; used to size the hosting DialogWindow.
@@ -63,11 +69,23 @@ private:
         }
     };
 
+    // One credit row on the About tab: a description label, a clickable link to
+    // the project, and a small license/attribution caption.
+    struct CreditRow {
+        std::unique_ptr<juce::Label> title;
+        std::unique_ptr<juce::Label> detail;
+        std::unique_ptr<juce::HyperlinkButton> link;
+    };
+
     juce::TabbedComponent tabs_ { juce::TabbedButtonBar::TabsAtTop };
     Page projectPage_;
     Page generalPage_;
     Page proPage_;
+    Page aboutPage_;
     juce::TextEditor projectInfo_;
+    juce::Label aboutTitle_, aboutBlurb_, creditsHeader_, aboutLicenseNote_;
+    Separator aboutSeparator_;
+    std::vector<CreditRow> creditRows_;
     juce::Label audioHeader_, musicHeader_;
     Separator generalSeparator_;
     std::vector<ProSection> proSections_;
