@@ -106,6 +106,15 @@ double Biquad::magnitudeDb(double freqHz, double sampleRate) const {
     return 20.0 * std::log10(mag + 1e-12);
 }
 
+std::complex<double> Biquad::response(double freqHz, double sampleRate) const {
+    const double w = 2.0 * M_PI * (freqHz / sampleRate);
+    const std::complex<double> z1 = std::polar(1.0, -w);
+    const std::complex<double> z2 = std::polar(1.0, -2.0 * w);
+    const std::complex<double> num = b0_ + b1_ * z1 + b2_ * z2;
+    const std::complex<double> den = 1.0 + a1_ * z1 + a2_ * z2;
+    return num / den;
+}
+
 void Biquad::setCoefficients(double b0, double b1, double b2, double a1, double a2) {
     b0_ = b0; b1_ = b1; b2_ = b2;
     a1_ = a1; a2_ = a2;

@@ -1676,6 +1676,7 @@ void MainComponent::updateEqView() {
     if (engine_.hasAudio())
         spectrumView_.setSpectrum(engine_.previewSpectrum(p.noiseReductionAmount));
     spectrumView_.setEq(vc::fullEqBands(p), p.highpassHz, engine_.sampleRate());
+    spectrumView_.setDeEsserCrossover(p.deEssEnabled ? p.deEssFreqHz : 0.0);
 }
 
 void MainComponent::changeListenerCallback(juce::ChangeBroadcaster*) {
@@ -2392,6 +2393,10 @@ void MainComponent::timerCallback() {
                              playing ? player_.fastCompReductionDb() : 0.0f);
     deEssMeter_.setReduction(playing ? player_.deEssReductionDb() : 0.0f);
     limiterMeter_.setReduction(playing ? player_.limiterReductionDb() : 0.0f);
+    spectrumView_.setLimiterReductionDb(playing ? player_.limiterReductionDb() : 0.0f);
+    spectrumView_.setDeEssReductionDb(playing ? player_.deEssReductionDb() : 0.0f);
+    spectrumView_.setCompReductionDb(playing ? player_.glueCompReductionDb() : 0.0f,
+                                     playing ? player_.fastCompReductionDb() : 0.0f);
     vuMeter_.setLevels(playing ? player_.rmsLevelDb() : -60.0f,
                        playing ? player_.peakLevelDb() : -60.0f);
 

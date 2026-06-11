@@ -32,7 +32,7 @@ struct ChainParams {
 
     // De-esser (sibilance control)
     bool deEssEnabled = true;
-    double deEssFreqHz = 6200.0;
+    double deEssFreqHz = 5500.0;
     double deEssThresholdDb = -37.0;
     double deEssPresenceThresholdDb = -18.0;
     double deEssRatio = 5.0;
@@ -141,7 +141,7 @@ inline ChainParams fixedVoiceCleanupParams() {
     params.targetLufs = -16.0;
     params.limiterEnabled = true;
     params.limiterCeilingDb = -1.0;
-    params.deEssFreqHz = 6200.0;
+    params.deEssFreqHz = 5500.0;
     params.deEssThresholdDb = -30.0;
     params.deEssPresenceThresholdDb = -18.0;
     params.deEssRatio = 5.0;

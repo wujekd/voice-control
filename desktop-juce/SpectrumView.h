@@ -55,6 +55,45 @@ public:
         if (showLive_ != show) { showLive_ = show; repaint(); }
     }
 
+    // Live broadband gain reduction from the limiter (positive dB). The EQ
+    // curve is pulled down by this amount so the display shows the limiter
+    // working. Eased toward the target so it reads smoothly.
+    void setLimiterReductionDb(float reductionDb) {
+        const float target = juce::jmax(0.0f, reductionDb);
+        limiterReductionDb_ += (target - limiterReductionDb_)
+            * (target > limiterReductionDb_ ? 0.6f : 0.25f);
+        repaint();
+    }
+
+    // Live gain reduction from the de-esser (positive dB). Unlike the limiter
+    // this only attenuates the high (sibilance) band above the crossover, so it
+    // pulls down just the top end of the curve. Eased like the limiter.
+    void setDeEssReductionDb(float reductionDb) {
+        const float target = juce::jmax(0.0f, reductionDb);
+        deEssReductionDb_ += (target - deEssReductionDb_)
+            * (target > deEssReductionDb_ ? 0.6f : 0.25f);
+        repaint();
+    }
+
+    // De-esser crossover frequency (Hz); 0 disables the de-ess dip in the view.
+    void setDeEsserCrossover(double crossoverHz) {
+        deEssCrossoverHz_ = crossoverHz;
+        repaint();
+    }
+
+    // Live gain reduction from the two compressor stages (glue + fast, positive
+    // dB). Two faint copies of the EQ curve droop downward by these amounts as a
+    // background animation. Eased like the other dynamics.
+    void setCompReductionDb(float glueDb, float fastDb) {
+        const float glueTarget = juce::jmax(0.0f, glueDb);
+        glueCompReductionDb_ += (glueTarget - glueCompReductionDb_)
+            * (glueTarget > glueCompReductionDb_ ? 0.6f : 0.25f);
+        const float fastTarget = juce::jmax(0.0f, fastDb);
+        fastCompReductionDb_ += (fastTarget - fastCompReductionDb_)
+            * (fastTarget > fastCompReductionDb_ ? 0.6f : 0.25f);
+        repaint();
+    }
+
     void paint(juce::Graphics& g) override;
 
 private:
@@ -70,6 +109,11 @@ private:
         return kFMin * std::pow(kFMax / kFMin, x / w);
     }
     double eqResponseAt(float freq) const;
+    float deEssReductionAt(float freq) const;
+    // Builds the EQ curve as a path, pulled down by extraDownDb (used both for
+    // the main curve and the compression "echo" copies). Clips to the plot.
+    juce::Path eqCurvePath(float w, juce::Rectangle<float> plot,
+                           float midY, float extraDownDb) const;
 
     vc::SpectrumResult spectrum_;     // static whole-file average
     vc::SpectrumResult processedSpectrum_; // static whole-file processed voice
@@ -79,4 +123,9 @@ private:
     std::vector<vc::EqBand> bands_;
     double highpassHz_ = 0.0;
     double sampleRate_ = 48000.0;
+    float limiterReductionDb_ = 0.0f; // live limiter gain reduction, eased
+    float deEssReductionDb_ = 0.0f;   // live de-esser high-band reduction, eased
+    double deEssCrossoverHz_ = 0.0;   // de-esser band split; 0 = no de-ess dip
+    float glueCompReductionDb_ = 0.0f; // live glue-comp reduction, eased
+    float fastCompReductionDb_ = 0.0f; // live fast-comp reduction, eased
 };

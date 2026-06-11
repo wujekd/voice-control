@@ -1,5 +1,7 @@
 #pragma once
 
+#include <complex>
+
 namespace vc {
 
 // Single biquad section, transposed direct-form II.
@@ -15,6 +17,10 @@ public:
 
     // Magnitude response in dB at freqHz for the current coefficients.
     double magnitudeDb(double freqHz, double sampleRate) const;
+
+    // Complex frequency response H(e^jw) at freqHz. Needed when combining bands
+    // (e.g. a band split high = x - lowpass(x)) where phase matters.
+    std::complex<double> response(double freqHz, double sampleRate) const;
 
     // Direct coefficient set (denominator normalised so a0 == 1).
     // Used for the K-weighting filters in the loudness meter.
