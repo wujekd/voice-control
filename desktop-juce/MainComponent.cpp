@@ -5,8 +5,8 @@
 #include <memory>
 
 namespace {
-constexpr int kDefaultWindowWidth = 920;
-constexpr int kMinWindowWidth = kDefaultWindowWidth - 70; // floor before things vanish
+constexpr int kDefaultWindowWidth = 850;
+constexpr int kMinWindowWidth = 850;
 constexpr int kOuterMargin = 16;
 constexpr int kBottomBreathingRoom = 0;
 constexpr int kSpectrumHeight = 102;
@@ -14,31 +14,42 @@ constexpr int kWaveformSectionGap = 4;               // EQ↔voice and voice↔m
 constexpr int kVoiceLaneHeight = 96;
 constexpr int kMusicLaneHeight = 88;
 constexpr int kTimelineHeight = kVoiceLaneHeight + kWaveformSectionGap + kMusicLaneHeight;
-constexpr int kGrMeterRowHeight = 18;
-constexpr int kOutputMeterRowHeight = 20;
+constexpr int kMeterRowHeight = 22;
+constexpr int kMeterPanelPadTop = 5;
+constexpr int kMeterPanelPadBottom = 3;
+constexpr int kMeterColGap = 18;
 constexpr int kMeterRowGap = 2;
+constexpr int kMetersSectionHeight = kMeterPanelPadTop + kMeterRowHeight + kMeterRowGap
+    + kMeterRowHeight + kMeterPanelPadBottom;
 constexpr int kMetersBottomGap = 6;
-constexpr int kMetersSectionHeight = kGrMeterRowHeight + kMeterRowGap
-    + kGrMeterRowHeight + kMeterRowGap
-    + kGrMeterRowHeight + kMeterRowGap
-    + kOutputMeterRowHeight + kMetersBottomGap;
+constexpr int kButtonColWidth = 100;
+constexpr int kControlSectionGap = 3;
+constexpr int kConnectorWidth = 21;
 constexpr int kMusicToggleBarHeight = 26;            // "Add background music" bar
 constexpr int kMusicSlotWidth = 80;
 constexpr int kMusicSideColWidth = kMusicSlotWidth * 3; // three pot slots per side
 constexpr int kMusicControlsHeight = 116;            // background-music controls row
 
+// Height of the main controls band (the two knob areas + transport).
+constexpr int kMainControlsHeight = 150;
+// Matched size for the Intensity and Noise-Reduction encoders (slider bounds).
+constexpr int kMainEncoderSize = 120;
+constexpr int kToneEncoderSize = 78;
+constexpr int kEncoderCaptionHeight = 21;
+constexpr int kVisualPanelPadding = 6; // inset for spectrum + waveform frame
+
 // The background-music section folds away by default. Everything above it is
 // common to both states; only the bottom block differs.
 constexpr int kCommonWindowHeight = kOuterMargin * 2
-    + kMetersSectionHeight                           // meters (matches resized())
-    + (138 + 8)                                      // main controls
+    + kMetersSectionHeight + kMetersBottomGap          // meters + gap below
+    + (kMainControlsHeight + 8)                      // main controls
     + kSpectrumHeight + kWaveformSectionGap          // spectrum + gap to voice lane
     + (18)                                           // progress
     + kBottomBreathingRoom;
 // Voice only: timeline shows the voice lane and nothing music-related at all
 // (the "Always off" preference).
 constexpr int kVoiceOnlyWindowHeight = kCommonWindowHeight
-    + (kVoiceLaneHeight + 8);
+    + (kVoiceLaneHeight + 8 + kVisualPanelPadding * 2);
 // Collapsed: voice-lane-only timeline plus the slim disclosure bar.
 constexpr int kCollapsedWindowHeight = kVoiceOnlyWindowHeight
     + (kMusicToggleBarHeight + 8);
@@ -46,7 +57,7 @@ constexpr int kCollapsedWindowHeight = kVoiceOnlyWindowHeight
 // disclosure bar disappears entirely — a small "Hide" button in the section
 // header takes over, so no vertical space is wasted on a full-width bar.
 constexpr int kExpandedWindowHeight = kCommonWindowHeight
-    + (kTimelineHeight + 8)
+    + (kTimelineHeight + 8 + kVisualPanelPadding * 2)
     + (kMusicControlsHeight + 8);
 
 juce::File appDataDir() {
@@ -250,6 +261,9 @@ juce::Font MainComponent::EncoderLookAndFeel::getLabelFont(juce::Label& label) {
 MainComponent::MainComponent() {
     setWantsKeyboardFocus(true);
 
+    // Install the app-wide dark/green look so every standard widget matches.
+    juce::LookAndFeel::setDefaultLookAndFeel(&appLnf_);
+
 #if JUCE_MAC
     juce::MenuBarModel::setMacMainMenu(this);
 #endif
@@ -293,6 +307,10 @@ MainComponent::MainComponent() {
     toneCaption_.setText("Tone", juce::dontSendNotification);
     noiseReductionCaption_.setText("Noise Reduction", juce::dontSendNotification);
     strengthCaption_.setText("Intensity", juce::dontSendNotification);
+    for (auto* caption : { &toneCaption_, &noiseReductionCaption_, &strengthCaption_ }) {
+        caption->setJustificationType(juce::Justification::centred);
+        caption->setFont(juce::Font(juce::FontOptions(16.0f, juce::Font::bold)));
+    }
     addAndMakeVisible(toneCaption_);
     addAndMakeVisible(noiseReductionCaption_);
     addAndMakeVisible(strengthCaption_);
@@ -303,31 +321,84 @@ MainComponent::MainComponent() {
         slider.setLookAndFeel(&encoderLookAndFeel_);
     };
 
+    // The three main knobs use the ported experiment looks, with the value shown
+    // inside the knob (0.0-9.9) instead of a text box below. The two areas they
+    // live on are added behind them so the knobs stay on top.
+    addAndMakeVisible(meterPanel_);
+    addAndMakeVisible(toneIntensityPanel_);
+    addAndMakeVisible(visualMonitorPanel_);
+    addAndMakeVisible(noiseNetPanel_);
+    meterPanel_.toBack();
+    toneIntensityPanel_.toBack();
+    visualMonitorPanel_.toBack();
+    noiseNetPanel_.toBack();
+    noiseNetPanel_.setEnergySource([this] {
+        if (!noiseReductionSlider_.isEnabled())
+            return 0.0f;
+        const double range = noiseReductionSlider_.getMaximum() - noiseReductionSlider_.getMinimum();
+        const float raw = range > 0.0
+            ? static_cast<float>((noiseReductionSlider_.getValue() - noiseReductionSlider_.getMinimum()) / range)
+            : 0.0f;
+        return vc::mapNoiseReductionEnergy(raw);
+    });
+
+    // The connector bridges the two areas; its flow strength follows Intensity.
+    addAndMakeVisible(signalConnector_);
+    signalConnector_.setEnergySource([this] {
+        const double range = strengthSlider_.getMaximum() - strengthSlider_.getMinimum();
+        const float raw = range > 0.0
+            ? static_cast<float>((strengthSlider_.getValue() - strengthSlider_.getMinimum()) / range)
+            : 0.0f;
+        return vc::mapIntensityFlowEnergy(raw);
+    });
+
+    auto styleMainKnob = [](juce::Slider& slider, juce::LookAndFeel& lnf) {
+        slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+        slider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        slider.setLookAndFeel(&lnf);
+    };
+
+    // Tone shows a Warm / Neutral / Bright label below the knob rather than a
+    // numeric readout inside it.
+    toneValueLabel_.setJustificationType(juce::Justification::centred);
+    toneValueLabel_.setFont(juce::Font(juce::FontOptions(13.0f)));
+    addAndMakeVisible(toneValueLabel_);
+    auto updateToneLabel = [this] {
+        const double v = toneSlider_.getValue();
+        toneValueLabel_.setText(v < -0.08 ? "Warm" : (v > 0.08 ? "Bright" : "Neutral"),
+                                juce::dontSendNotification);
+    };
+
     toneSlider_.setRange(-1.0, 1.0, 0.01);
     toneSlider_.setValue(0.0, juce::dontSendNotification);
-    toneSlider_.textFromValueFunction = [](double value) {
-        if (value < -0.08)
-            return juce::String("Warm");
-        if (value > 0.08)
-            return juce::String("Crisp");
-        return juce::String("Natural");
+    styleMainKnob(toneSlider_, basicKnobLnf_);
+    basicKnobLnf_.markNoReadout(toneSlider_);
+    toneSlider_.onValueChange = [this, updateToneLabel] {
+        updateToneLabel();
+        applyParamsLive();
+        updateEqView();
     };
-    configureEncoder(toneSlider_);
-    toneSlider_.onValueChange = [this] { applyParamsLive(); updateEqView(); };
     addAndMakeVisible(toneSlider_);
+    updateToneLabel();
 
     noiseReductionSlider_.setRange(0.0, 100.0, 1.0);
     noiseReductionSlider_.setValue(75.0, juce::dontSendNotification);
-    noiseReductionSlider_.setTextValueSuffix(" %");
-    configureEncoder(noiseReductionSlider_);
-    noiseReductionSlider_.onValueChange = [this] { applyParamsLive(); };
+    styleMainKnob(noiseReductionSlider_, neuralKnobLnf_);
+    noiseReductionSlider_.onValueChange = [this] {
+        applyParamsLive();
+        if (!player_.isPlaying() && noiseReductionSlider_.isEnabled())
+            noiseNetPanel_.triggerPreviewBurst();
+    };
     addAndMakeVisible(noiseReductionSlider_);
 
-    strengthSlider_.setRange(0.0, 100.0, 1.0);
-    strengthSlider_.setValue(100.0, juce::dontSendNotification);
-    strengthSlider_.setTextValueSuffix(" %");
-    configureEncoder(strengthSlider_);
-    strengthSlider_.onValueChange = [this] { applyParamsLive(); updateEqView(); };
+    strengthSlider_.setRange(10.0, 100.0, 1.0);
+    strengthSlider_.setValue(10.0, juce::dontSendNotification);
+    styleMainKnob(strengthSlider_, intensityKnobLnf_);
+    strengthSlider_.onValueChange = [this] {
+        applyParamsLive();
+        updateEqView();
+        signalConnector_.repaint();
+    };
     addAndMakeVisible(strengthSlider_);
 
     auto configureProSlider = [this, configureEncoder](juce::Slider& slider, double min, double max,
@@ -506,13 +577,15 @@ MainComponent::MainComponent() {
         label->setFont(juce::Font(juce::FontOptions(10.0f)));
         label->setJustificationType(juce::Justification::centred);
     }
+    // The visible background-music / duck encoders use the basic ("Output") knob
+    // look with the value shown inside (0.0-9.9); size follows their bounds.
     for (auto* slider : { &musicMasterVolumeSlider_, &musicVolumeSlider_,
                           &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ }) {
-        encoderLookAndFeel_.markCompact(*slider);
-        slider->setTextBoxStyle(juce::Slider::TextBoxBelow, false, 66, 18);
+        slider->setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+        slider->setLookAndFeel(&basicKnobLnf_);
     }
     for (auto* slider : { &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
-        encoderLookAndFeel_.markSoftDisabled(*slider);
+        basicKnobLnf_.markSoftDisabled(*slider);
 
     addAndMakeVisible(duckView_);
 
@@ -552,6 +625,12 @@ MainComponent::MainComponent() {
     helpButton_.setTooltip("Open the user guide");
     helpButton_.onClick = [this] { openHelp(); };
     addAndMakeVisible(helpButton_);
+
+    // Unified dark/green button look across the visible buttons.
+    for (auto* b : { &playButton_, &listenButton_, &exportButton_, &helpButton_,
+                     &resetProButton_, &musicSectionToggle_, &musicHideButton_,
+                     &musicMuteButton_, &duckOnOffButton_, &addMusicButton_, &removeMusicButton_ })
+        b->setLookAndFeel(&buttonLnf_);
 
     captureSectionChromeBaselines();
     updateMusicMuteUi();
@@ -687,6 +766,9 @@ MainComponent::~MainComponent() {
         juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
 
+    // Stop pointing the default LookAndFeel at our member before it is destroyed.
+    juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
+
     // Tear down the settings window first: it re-parents controls that are
     // members of this component, so it must release them before they are
     // destroyed below.
@@ -700,6 +782,11 @@ MainComponent::~MainComponent() {
                      &musicFadeInSlider_, &musicFadeOutSlider_,
                      &duckLookAheadSlider_, &duckReductionSlider_, &duckFilterSlider_ })
         s->setLookAndFeel(nullptr);
+
+    for (auto* b : { &playButton_, &listenButton_, &exportButton_, &helpButton_,
+                     &resetProButton_, &musicSectionToggle_, &musicHideButton_,
+                     &musicMuteButton_, &duckOnOffButton_, &addMusicButton_, &removeMusicButton_ })
+        b->setLookAndFeel(nullptr);
 
     stopTimer();
     deviceManager_.removeChangeListener(this);
@@ -718,7 +805,12 @@ double MainComponent::currentToneAmount() const {
 }
 
 double MainComponent::currentIntensity() const {
-    return juce::jlimit(0.0, 1.0, strengthSlider_.getValue() / 100.0);
+    const double min = strengthSlider_.getMinimum();
+    const double max = strengthSlider_.getMaximum();
+    const double range = max - min;
+    if (range <= 0.0)
+        return 0.1;
+    return juce::jlimit(0.1, 1.0, 0.1 + 0.9 * (strengthSlider_.getValue() - min) / range);
 }
 
 vc::ChainParams MainComponent::buildParams() const {
@@ -1328,6 +1420,8 @@ bool MainComponent::applyProjectState(const juce::var& state, bool fromAutosave)
     setSliderIfPresent(toneSlider_, controls, "tone");
     setSliderIfPresent(noiseReductionSlider_, controls, "noiseReduction");
     setSliderIfPresent(strengthSlider_, controls, "intensity");
+    strengthSlider_.setValue(juce::jmax(strengthSlider_.getMinimum(), strengthSlider_.getValue()),
+                             juce::dontSendNotification);
     setSliderIfPresent(fastThresholdSlider_, controls, "fastThreshold");
     setSliderIfPresent(fastRatioSlider_, controls, "fastRatio");
     setSliderIfPresent(glueThresholdSlider_, controls, "glueThreshold");
@@ -1414,11 +1508,26 @@ bool MainComponent::hasProjectContent() const {
 }
 
 void MainComponent::maybeSaveBeforeReplacingSession(std::function<void(bool proceed)> onDone) {
-    // Prompt whenever there is real work that isn't safely stored in a named
-    // project file: either it changed since the last save (dirty), or it has
-    // never been saved to a .vcproj at all (only sitting in the autosave).
-    const bool unsaved = projectDirty_ || currentProjectFile_ == juce::File();
-    if (!unsaved || !hasProjectContent()) {
+    // A named project autosaves continuously to its own .vcproj, so it is
+    // already "saved" — there is nothing to ask about. Flush any change still
+    // inside the autosave countdown (clearProject() blanks currentProjectFile_
+    // before its own save, so we must do it here while the file still points at
+    // the old project) and carry on without a dialog.
+    if (currentProjectFile_ != juce::File()) {
+        if (projectDirty_) {
+            saveAutosaveSession();
+            saveAnalysisFileForCurrentMedia();
+            projectDirty_ = false;
+            autosaveCountdown_ = 0;
+        }
+        if (onDone)
+            onDone(true);
+        return;
+    }
+
+    // An unnamed session lives only in the autosave; offer to keep it as a
+    // named project if it actually has content worth saving.
+    if (!hasProjectContent()) {
         if (onDone)
             onDone(true);
         return;
@@ -1494,7 +1603,7 @@ void MainComponent::clearProject() {
     resetProDefaults();
     toneSlider_.setValue(0.0, juce::dontSendNotification);
     noiseReductionSlider_.setValue(75.0, juce::dontSendNotification);
-    strengthSlider_.setValue(100.0, juce::dontSendNotification);
+    strengthSlider_.setValue(10.0, juce::dontSendNotification);
     playButton_.setEnabled(false);
     listenButton_.setEnabled(false);
     exportButton_.setEnabled(false);
@@ -2382,6 +2491,8 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
 
 void MainComponent::timerCallback() {
     const bool playing = player_.isPlaying();
+    noiseNetPanel_.setPlaybackActive(playing);
+    signalConnector_.setPlaybackActive(playing);
     playButton_.setButtonText(playing ? "Stop" : "Play");
     // Gentle green backlight while playing (matching the encoders' green); neutral grey otherwise.
     const auto playCol = playing ? juce::Colour(0xff2f7d52) : juce::Colour(0xff3a3f49);
@@ -2471,14 +2582,25 @@ void MainComponent::paint(juce::Graphics& g) {
 void MainComponent::resized() {
     auto r = getLocalBounds().reduced(16);
 
-    // Live gain-reduction meters.
-    compMeter_.setBounds(r.removeFromTop(kGrMeterRowHeight));
-    r.removeFromTop(kMeterRowGap);
-    deEssMeter_.setBounds(r.removeFromTop(kGrMeterRowHeight));
-    r.removeFromTop(kMeterRowGap);
-    limiterMeter_.setBounds(r.removeFromTop(kGrMeterRowHeight));
-    r.removeFromTop(kMeterRowGap);
-    vuMeter_.setBounds(r.removeFromTop(kOutputMeterRowHeight));
+    // Live meters in a framed 2×2 grid.
+    auto metersBlock = r.removeFromTop(kMetersSectionHeight);
+    meterPanel_.setBounds(metersBlock);
+    auto metersInner = metersBlock;
+    metersInner.removeFromTop(kMeterPanelPadTop);
+    metersInner.removeFromBottom(kMeterPanelPadBottom);
+    const int meterHalfW = (metersInner.getWidth() - kMeterColGap) / 2;
+
+    auto row1 = metersInner.removeFromTop(kMeterRowHeight);
+    compMeter_.setBounds(row1.removeFromLeft(meterHalfW));
+    row1.removeFromLeft(kMeterColGap);
+    deEssMeter_.setBounds(row1);
+
+    metersInner.removeFromTop(kMeterRowGap);
+    auto row2 = metersInner.removeFromTop(kMeterRowHeight);
+    limiterMeter_.setBounds(row2.removeFromLeft(meterHalfW));
+    row2.removeFromLeft(kMeterColGap);
+    vuMeter_.setBounds(row2);
+
     r.removeFromTop(kMetersBottomGap);
 
     auto placeEncoder = [](juce::Rectangle<int> area, juce::Label& label, juce::Slider& slider,
@@ -2495,46 +2617,96 @@ void MainComponent::resized() {
         progressBar_.setBounds(row);
     };
 
-    auto encoderRow = r.removeFromTop(138);
+    auto encoderRow = r.removeFromTop(kMainControlsHeight);
 
-    // Play/bypass hug the left edge and Export the right edge (respecting only
-    // the shared outer margin); the three encoders are then spread evenly across
-    // the space that remains in between.
-    constexpr int buttonColWidth = 108;
-    constexpr int encoderWidth = 156;
-    constexpr int exportWidth = 104;
+    // Narrow button columns (play/bypass + export match each other); wider control
+    // panels (intensity+tone and noise reduction match each other).
+    const int band = encoderRow.getHeight();
+    const int mainEncoderSize = juce::jmin(band - kEncoderCaptionHeight - 2, kMainEncoderSize);
+    const int toneSize = juce::jmin(band - kEncoderCaptionHeight - 2, kToneEncoderSize);
+    const int controlTotal = encoderRow.getWidth() - kButtonColWidth * 2
+        - kControlSectionGap * 2 - kConnectorWidth;
+    const int controlW = controlTotal / 2;
 
-    auto mainTransport = encoderRow.removeFromLeft(buttonColWidth).reduced(2, 4);
-    playButton_.setBounds(mainTransport.removeFromTop(82));
-    mainTransport.removeFromTop(8);
-    listenButton_.setBounds(mainTransport.removeFromTop(36));
+    auto transportArea = encoderRow.removeFromLeft(kButtonColWidth);
+    encoderRow.removeFromLeft(kControlSectionGap);
+    auto area1 = encoderRow.removeFromLeft(controlW);
+    auto connectorArea = encoderRow.removeFromLeft(kConnectorWidth);
+    auto area2 = encoderRow.removeFromLeft(controlW);
+    encoderRow.removeFromLeft(kControlSectionGap);
+    auto exportArea = encoderRow;
 
-    // Export sits flush right and spans the full combined height of the
-    // play + bypass column.
-    auto exportArea = encoderRow.removeFromRight(exportWidth).reduced(2, 4);
-    exportButton_.setBounds(exportArea);
+    toneIntensityPanel_.setBounds(area1);
+    noiseNetPanel_.setBounds(area2);
+    signalConnector_.setBounds(connectorArea);
 
-    // Distribute the three encoders evenly within the remaining middle band:
-    // four equal gaps (before, between, between, after).
-    const int encoderGap = juce::jmax(0, (encoderRow.getWidth() - encoderWidth * 3) / 4);
-    encoderRow.removeFromLeft(encoderGap);
-    auto strengthArea = encoderRow.removeFromLeft(encoderWidth);
-    encoderRow.removeFromLeft(encoderGap);
-    auto toneArea = encoderRow.removeFromLeft(encoderWidth);
-    encoderRow.removeFromLeft(encoderGap);
-    auto noiseArea = encoderRow.removeFromLeft(encoderWidth);
-    placeEncoder(strengthArea, strengthCaption_, strengthSlider_);
-    placeEncoder(toneArea, toneCaption_, toneSlider_);
-    placeEncoder(noiseArea, noiseReductionCaption_, noiseReductionSlider_);
+    auto mainTransport = transportArea.reduced(2, 4);
+    listenButton_.setBounds(mainTransport.removeFromBottom(36));
+    mainTransport.removeFromBottom(8);
+    playButton_.setBounds(mainTransport);
+
+    exportButton_.setBounds(exportArea.reduced(2, 4));
+
+    // Intensity + Tone: three equal gaps (left, between knobs, right).
+    {
+        auto a1Inner = area1.reduced(4, 2);
+        const int contentW = mainEncoderSize + toneSize;
+        const int spacing = juce::jmax(4, (a1Inner.getWidth() - contentW) / 3);
+
+        // Intensity: caption above, knob fills the rest.
+        const int x0 = a1Inner.getX() + spacing;
+        {
+            juce::Rectangle<int> cell(x0, a1Inner.getY(), mainEncoderSize, a1Inner.getHeight());
+            strengthCaption_.setBounds(cell.removeFromTop(kEncoderCaptionHeight).translated(0, -2));
+            strengthSlider_.setBounds(cell.withSizeKeepingCentre(
+                mainEncoderSize, juce::jmin(cell.getHeight(), mainEncoderSize)));
+        }
+
+        // Tone: caption above, then the knob with the Warm/Neutral/Bright label
+        // tucked right beneath it (knob + label centred as one group).
+        const int x1 = x0 + mainEncoderSize + spacing;
+        {
+            juce::Rectangle<int> cell(x1, a1Inner.getY(), toneSize, a1Inner.getHeight());
+            toneCaption_.setBounds(cell.removeFromTop(kEncoderCaptionHeight).translated(0, -2));
+            constexpr int toneLabelH = 16;
+            const int ts = juce::jmin(juce::jmin(cell.getWidth(), cell.getHeight() - toneLabelH), toneSize);
+            auto group = cell.withSizeKeepingCentre(cell.getWidth(), ts + toneLabelH);
+            toneSlider_.setBounds(group.removeFromTop(ts).withSizeKeepingCentre(ts, ts));
+            toneValueLabel_.setBounds(group);
+        }
+    }
+
+    // Noise reduction: knob column, then the neural net with extra breathing room.
+    auto a2 = area2.reduced(6, 2);
+    const int nrSize = mainEncoderSize;
+    const int knobColW = juce::jmin(a2.getWidth() - 40, nrSize + 18);
+    auto knobCol = a2.removeFromLeft(knobColW);
+    noiseReductionCaption_.setBounds(knobCol.removeFromTop(kEncoderCaptionHeight));
+    auto nrKnob = knobCol.withSizeKeepingCentre(nrSize, nrSize);
+    noiseReductionSlider_.setBounds(nrKnob);
+    noiseNetPanel_.setSourcePoint((nrKnob.getCentre() - area2.getTopLeft()).toFloat());
+
+    // Four parallel wires cross the connector into the net, evenly spaced and
+    // centred on the net's source row.
+    const float wireW = static_cast<float>(connectorArea.getWidth());
+    const float wireCy = static_cast<float>(nrKnob.getCentreY() - connectorArea.getY());
+    std::vector<juce::Point<float>> wireLeft, wireRight;
+    for (int i = 0; i < 4; ++i) {
+        const float wy = wireCy + (static_cast<float>(i) - 1.5f) * 13.0f;
+        wireLeft.push_back({ 0.0f, wy });
+        wireRight.push_back({ wireW, wy });
+    }
+    signalConnector_.setEndpoints(std::move(wireLeft), std::move(wireRight));
     r.removeFromTop(8);
 
-    spectrumView_.setBounds(r.removeFromTop(kSpectrumHeight));
-    r.removeFromTop(kWaveformSectionGap);
-
-    // The timeline shrinks to the voice lane alone when the backing-music
-    // section is folded away.
     const int timelineHeight = musicSectionExpanded_ ? kTimelineHeight : kVoiceLaneHeight;
-    auto timelineBounds = r.removeFromTop(timelineHeight);
+    const int visualBlockHeight = kVisualPanelPadding * 2 + kSpectrumHeight + kWaveformSectionGap + timelineHeight;
+    auto visualBlock = r.removeFromTop(visualBlockHeight);
+    visualMonitorPanel_.setBounds(visualBlock);
+    auto visualInner = visualBlock.reduced(kVisualPanelPadding);
+    spectrumView_.setBounds(visualInner.removeFromTop(kSpectrumHeight));
+    visualInner.removeFromTop(kWaveformSectionGap);
+    auto timelineBounds = visualInner;
     musicTimeline_.setBounds(timelineBounds);
     // The voice drop field covers only the voice lane (top), leaving the music
     // lane below clickable so its own "+" adds a music clip.

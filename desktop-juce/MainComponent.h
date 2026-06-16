@@ -11,9 +11,11 @@
 #include "PreviewPlayer.h"
 #include "ProcessingEngine.h"
 #include "ProjectManagerComponent.h"
+#include "NeuralNetworkPanel.h"
 #include "Presets.h" // vc::Preset, vc::Tone, vc::ChainParams
 #include "SettingsComponent.h"
 #include "SpectrumView.h"
+#include "VoiceKnobs.h"
 
 #include <array>
 #include <atomic>
@@ -182,8 +184,26 @@ private:
     juce::TextButton helpButton_ { "?" }; // opens the user guide
     bool followSystemDefault_ = true;
     bool updatingDevice_ = false; // re-entrancy guard for device changes
+    // App-wide dark/green look, installed as the default LookAndFeel so every
+    // standard widget (combo boxes, progress bar, menus, settings tabs, …) matches.
+    vc::AppLookAndFeel appLnf_;
     EncoderLookAndFeel encoderLookAndFeel_;
+    // Ported GUI-experiment knob looks: basic ("Output") for Tone + background
+    // encoders, "Decay" for Intensity, "Neural" for Noise Reduction.
+    vc::BasicKnobLookAndFeel basicKnobLnf_;
+    vc::IntensityKnobLookAndFeel intensityKnobLnf_;
+    vc::NeuralKnobLookAndFeel neuralKnobLnf_;
+    // The two grouped areas: Intensity+Tone on a subtle panel, Noise Reduction
+    // sitting on its animated neural-network backdrop; visual monitor frame below.
+    vc::EncoderGroupPanel meterPanel_;
+    vc::EncoderGroupPanel toneIntensityPanel_;
+    vc::EncoderGroupPanel visualMonitorPanel_;
+    vc::NeuralNetworkPanel noiseNetPanel_;
+    vc::SignalFlowConnector signalConnector_;
+    // Shared dark/green button look applied across the UI.
+    vc::PanelButtonLookAndFeel buttonLnf_;
     juce::Label toneCaption_, noiseReductionCaption_, strengthCaption_;
+    juce::Label toneValueLabel_; // Warm / Neutral / Bright shown below the Tone knob
     juce::Slider toneSlider_;
     juce::Slider noiseReductionSlider_;
     juce::Slider strengthSlider_;
@@ -251,9 +271,9 @@ private:
     juce::TextButton exportButton_ { "Export" };
     juce::Label statusLabel_;
 
-    CompMeter compMeter_ { "Comp", 12.0f, juce::Colour(0xff5aa0ff), juce::Colour(0xff5aa0ff) };
-    GrMeter deEssMeter_ { "De-ess", 10.0f, juce::Colour(0xffffc14d) };
-    GrMeter limiterMeter_ { "Limiter", 5.0f, juce::Colour(0xffff5d5d) };
+    CompMeter compMeter_ { "Comp", 12.0f, juce::Colour(0xff6ee07a), juce::Colour(0xff58b8e8) };
+    GrMeter deEssMeter_ { "De-ess", 10.0f, juce::Colour(0xffe0c050) };
+    GrMeter limiterMeter_ { "Limiter", 5.0f, juce::Colour(0xffe85858) };
     VuMeter vuMeter_ { "Output" };
 
     double progress_ = 0.0;

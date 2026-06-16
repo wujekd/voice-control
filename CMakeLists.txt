@@ -96,10 +96,12 @@ if(VC_BUILD_APP)
         desktop-juce/ExportComponent.cpp
         desktop-juce/FileDropComponent.cpp
         desktop-juce/MusicTimeline.cpp
+        desktop-juce/NeuralNetworkPanel.cpp
         desktop-juce/PreviewPlayer.cpp
         desktop-juce/ProcessingEngine.cpp
         desktop-juce/SettingsComponent.cpp
-        desktop-juce/SpectrumView.cpp)
+        desktop-juce/SpectrumView.cpp
+        desktop-juce/VoiceKnobs.cpp)
 
     target_compile_definitions(voice-control-app PRIVATE
         JUCE_WEB_BROWSER=0
