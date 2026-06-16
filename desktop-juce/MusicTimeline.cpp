@@ -240,7 +240,7 @@ void MusicTimeline::drawWaveformPeaks(juce::Graphics& g, juce::Rectangle<float> 
     if (peaks.empty() || alpha <= 0.01f)
         return;
 
-    g.setColour(juce::Colour(0xff6bd0ff).withAlpha(alpha));
+    g.setColour(juce::Colour(0xff63d6b0).withAlpha(alpha));
     const float midY = area.getCentreY();
     const float halfH = area.getHeight() * 0.38f;
     const int width = std::max(1, static_cast<int>(area.getWidth()));
@@ -285,7 +285,7 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
         return;
     }
 
-    g.setColour(juce::Colour(0xff6bd0ff));
+    g.setColour(juce::Colour(0xff63d6b0));
 
     if (voice_ == nullptr || voice_->getNumSamples() == 0)
         return;

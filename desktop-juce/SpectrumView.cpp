@@ -129,7 +129,7 @@ void SpectrumView::paint(juce::Graphics& g) {
         }
         path.lineTo(w, plot.getBottom());
         path.closeSubPath();
-        g.setColour(live ? juce::Colour(0xff4da6ff).withAlpha(0.22f)
+        g.setColour(live ? juce::Colour(0xff4fb6a0).withAlpha(0.22f)
                          : juce::Colours::white.withAlpha(0.10f));
         g.fillPath(path);
 
@@ -146,7 +146,7 @@ void SpectrumView::paint(juce::Graphics& g) {
                 if (!started) { after.startNewSubPath((float) px, y); started = true; }
                 else after.lineTo((float) px, y);
             }
-            g.setColour(juce::Colour(0xff4da6ff).withAlpha(0.5f));
+            g.setColour(juce::Colour(0xff4fb6a0).withAlpha(0.5f));
             g.strokePath(after, juce::PathStrokeType(1.0f));
         }
     }
