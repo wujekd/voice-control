@@ -81,6 +81,20 @@ std::vector<EqBand> toneAmountBands(double amount) {
     };
 }
 
+// Smoothly fades a band's gain in over the [0, deadzone] window instead of
+// gating it on/off at the threshold. A hard gate made a band snap from absent
+// to its full threshold gain (e.g. the high-shelf air boost jumping in as
+// intensity crossed the activation point — an audible click). smoothstep keeps
+// the gain continuous (and C1) at the deadzone while leaving larger gains
+// untouched.
+double softGateGain(double gain, double deadzone) {
+    const double mag = std::fabs(gain);
+    if (mag >= deadzone)
+        return gain;
+    const double t = mag / deadzone;
+    return gain * (t * t * (3.0 - 2.0 * t));
+}
+
 std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength, double f0) {
     std::vector<EqBand> bands;
     if (!spectrum.valid) return bands;
@@ -108,7 +122,8 @@ std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double st
         // Never boost a near-empty band (would just amplify noise/hiss).
         if (measuredRel < kEmptyFloor) gain = std::min(gain, 0.0);
         gain = std::clamp(gain, -kMaxCut, kMaxBoost);
-        if (std::fabs(gain) >= kDeadzone)
+        gain = softGateGain(gain, kDeadzone);
+        if (std::fabs(gain) >= 0.05)
             bands.push_back({ type, freq, gain, q });
     };
 
@@ -178,7 +193,8 @@ std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpec
             gain = 0.0;
 
         gain = std::clamp(gain, -kMaxCut, kMaxBoost);
-        if (std::fabs(gain) >= kDeadzone)
+        gain = softGateGain(gain, kDeadzone);
+        if (std::fabs(gain) >= 0.05)
             bands.push_back({ type, freq, gain, q });
     };
 
