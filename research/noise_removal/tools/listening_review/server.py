@@ -16,9 +16,8 @@ def rel(path):
     return path.relative_to(ROOT).as_posix()
 
 
-def find_match(output_dir, stem):
-    matches = sorted(output_dir.glob(f"{stem}*.wav"))
-    return matches[0] if matches else None
+def find_matches(output_dir, stem):
+    return sorted(output_dir.glob(f"{stem}*.wav"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 class ReviewServer(BaseHTTPRequestHandler):
@@ -70,10 +69,10 @@ class ReviewServer(BaseHTTPRequestHandler):
         rows = []
 
         for input_file in sorted(input_dir.glob("*.wav")):
-            output_file = find_match(output_dir, input_file.stem)
-            reference_file = find_match(reference_dir, input_file.stem)
+            output_files = find_matches(output_dir, input_file.stem)
+            reference_files = find_matches(reference_dir, input_file.stem)
             sample_notes = notes.get(input_file.name, {})
-            rows.append(self.render_row(input_file, output_file, reference_file, sample_notes))
+            rows.append(self.render_row(input_file, output_files, reference_files, sample_notes))
 
         body = "\n".join(rows) if rows else "<p>No input WAV files found.</p>"
         return f"""<!doctype html>
@@ -87,7 +86,7 @@ class ReviewServer(BaseHTTPRequestHandler):
     .path {{ color: #656d76; margin-bottom: 24px; }}
     .sample {{ border-top: 1px solid #d0d7de; padding: 18px 0; }}
     .name {{ font-weight: 650; margin-bottom: 10px; }}
-    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 14px; }}
+    .grid {{ display: grid; grid-template-columns: minmax(260px, 720px); gap: 14px; }}
     .label {{ font-size: 12px; color: #656d76; margin-bottom: 4px; }}
     audio {{ width: 100%; }}
     form {{ margin-top: 12px; display: grid; grid-template-columns: repeat(3, 120px) 1fr auto; gap: 8px; align-items: end; }}
@@ -110,13 +109,21 @@ class ReviewServer(BaseHTTPRequestHandler):
         url = "/file/" + rel(path)
         return f'<div><div class="label">{label}</div><audio controls src="{html.escape(url)}"></audio></div>'
 
-    def render_row(self, input_file, output_file, reference_file, notes):
+    def render_audio_group(self, title, paths):
+        if not paths:
+            return self.render_audio(title, None)
+        players = []
+        for path in paths:
+            players.append(self.render_audio(path.stem, path))
+        return "\n    ".join(players)
+
+    def render_row(self, input_file, output_files, reference_files, notes):
         return f"""<section class="sample">
   <div class="name">{html.escape(input_file.name)}</div>
   <div class="grid">
     {self.render_audio("Original", input_file)}
-    {self.render_audio("Processed", output_file)}
-    {self.render_audio("Reference", reference_file)}
+    {self.render_audio_group("Processed", output_files)}
+    {self.render_audio_group("Reference", reference_files)}
   </div>
   <form method="post" action="/notes">
     <input type="hidden" name="sample" value="{html.escape(input_file.name)}">

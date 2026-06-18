@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Minimum macOS the build runs on. Must be set before project(): otherwise CMake
+# stamps the build machine's own OS version as the minimum, which blocks anyone
+# on an earlier release ("can't use this version of the application with this
+# version of macOS"). Override with -DCMAKE_OSX_DEPLOYMENT_TARGET=...
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
+
 # C / Objective-C(++) are needed by JUCE on macOS (.c and .mm sources).
 project(voice_control VERSION 0.1.0 LANGUAGES C CXX OBJC OBJCXX)
 
@@ -39,6 +48,11 @@ target_include_directories(vc_video PUBLIC video)
 find_program(CARGO_EXECUTABLE cargo REQUIRED
     HINTS /opt/homebrew/bin /usr/local/bin $ENV{HOME}/.cargo/bin)
 
+# `cargo cbuild` (from cargo-c) is a subcommand binary cargo finds via PATH.
+# Xcode runs build phases with a stripped PATH that omits Homebrew/cargo dirs,
+# so bake the cargo bin dir onto PATH for the build rule below.
+get_filename_component(CARGO_BIN_DIR "${CARGO_EXECUTABLE}" DIRECTORY)
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
     set(DF_RUST_TARGET "aarch64-apple-darwin")
 else()
@@ -53,7 +67,8 @@ set(DF_INCLUDE "${DF_OUT}/include/deep_filter")
 
 add_custom_command(
     OUTPUT ${DF_STATIC}
-    COMMAND ${CARGO_EXECUTABLE} cbuild --release --no-default-features
+    COMMAND ${CMAKE_COMMAND} -E env "PATH=${CARGO_BIN_DIR}:$ENV{PATH}"
+            ${CARGO_EXECUTABLE} cbuild --release --no-default-features
             --features capi --manifest-path ${DF_MANIFEST}
     WORKING_DIRECTORY ${DF_DIR}
     COMMENT "Building native DeepFilterNet (libdeepfilter.a)"
@@ -89,6 +104,13 @@ if(VC_BUILD_APP)
         VERSION 0.1.0
         PRODUCT_NAME "Voice Control"
         COMPANY_NAME "VoiceControl")
+
+    # Sign with the Apple Development identity so the code signature is stable
+    # across rebuilds — macOS then remembers mic/accessibility grants instead of
+    # re-prompting. Baked in here so it survives Xcode-project regeneration.
+    set_target_properties(voice-control-app PROPERTIES
+        XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
+        XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "2SBVUZX3N7")
 
     target_sources(voice-control-app PRIVATE
         desktop-juce/Main.cpp
