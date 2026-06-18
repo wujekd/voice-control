@@ -19,9 +19,10 @@ class Denoiser {
 public:
     // Loads the model tar.gz at modelPath. attenLimDb caps how much the model is
     // allowed to attenuate (>=100 ≈ unlimited). postFilterBeta>0 enables the
-    // optional post-filter (the `--pf` CLI option); left off by default to match
-    // the reference `deep-filter` CLI / Python output. Sets valid()==false on
-    // failure rather than throwing, so the caller can fall back to the dry signal.
+    // optional post-filter (the `--pf` CLI option). The generic wrapper leaves it
+    // off unless requested; app callers pass the CLI-matching beta explicitly.
+    // Sets valid()==false on failure rather than throwing, so the caller can fall
+    // back to the dry signal.
     explicit Denoiser(std::string modelPath, float attenLimDb = 100.0f,
                       float postFilterBeta = 0.0f);
     ~Denoiser();

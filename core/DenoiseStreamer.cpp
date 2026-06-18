@@ -7,6 +7,10 @@ namespace vc {
 namespace {
 constexpr int kHopFallback = 480;   // DeepFilterNet3 hop @ 48 kHz
 constexpr float kAttenLimitDb = 100.0f; // ~unlimited attenuation
+// Post-filter beta, matching the clean reference `deep-filter --pf` render.
+// The C API runtime defaults are patched in the vendored DeepFilterNet submodule
+// to match the same CLI thresholds and mask reduction.
+constexpr float kPostFilterBeta = 0.02f;
 } // namespace
 
 DenoiseStreamer::~DenoiseStreamer() {
@@ -152,7 +156,7 @@ void DenoiseStreamer::fillHop(int g, bool discard) {
 }
 
 void DenoiseStreamer::workerLoop() {
-    denoiser_ = std::make_unique<Denoiser>(modelPath_, kAttenLimitDb);
+    denoiser_ = std::make_unique<Denoiser>(modelPath_, kAttenLimitDb, kPostFilterBeta);
     if (!denoiser_->valid() || denoiser_->hop() != hop_) {
         // Model unavailable (or unexpected hop): leave everything dry.
         active_.store(false, std::memory_order_release);

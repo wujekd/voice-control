@@ -15,7 +15,7 @@
 #include <memory>
 
 namespace {
-constexpr int kAnalysisCacheVersion = 3;
+constexpr int kAnalysisCacheVersion = 4;
 
 bool extensionIsVideo(const juce::File& f) {
     static const juce::StringArray video { "mp4", "mov", "m4v", "mkv", "avi", "webm" };
@@ -35,7 +35,8 @@ juce::File denoisedCacheFileFor(const juce::File& source) {
         .getChildFile("Voice Control")
         .getChildFile("AnalysisCache");
     dir.createDirectory();
-    return dir.getChildFile(juce::String::toHexString(source.getFullPathName().hashCode64()) + ".denoised.wav");
+    return dir.getChildFile(juce::String::toHexString(source.getFullPathName().hashCode64())
+                            + ".dfn-cli-defaults-v1.denoised.wav");
 }
 
 juce::var floatVectorToVar(const std::vector<float>& values) {
@@ -382,17 +383,26 @@ bool ProcessingEngine::loadMedia(const juce::File& media, juce::String& error) {
         }
     }
 
-    // Otherwise kick off the in-process neural denoise in the background.
-    // Playback can start immediately on the dry signal; the denoised version
-    // fills in (faster than real time) and is blended live per the
-    // noise-reduction amount. The completed pass is cached by
-    // refreshVoiceProfileFromDenoised().
-    if (!denoisedRestored)
+    // Otherwise run the neural denoise over the whole file now and wait for it.
+    // The model is far faster than real time (~80x), so denoising the entire
+    // file takes ~1-2 s under the existing load spinner. Denoising once up front
+    // keeps preview/export deterministic and gives the UI complete dry/clean
+    // layers before playback starts.
+    if (!denoisedRestored) {
         streamer_.start(original_, vc::Denoiser::findDefaultModel());
+        streamer_.waitUntilComplete();
+    }
 
-    // If restored from disk it is already cached; otherwise the completed model
-    // pass is captured by persistDenoisedAudioIfReady().
+    // If restored from disk it is already cached; otherwise we persist below.
     denoisedAudioSaved_ = denoisedRestored;
+
+    // Build the denoised vocal profile (spectrum, pitch, auto-EQ, waveform peaks)
+    // and persist the audio cache now, before playback — not mid-playback. Both
+    // no-op safely if the cache already supplied the profile or if the model was
+    // unavailable (in which case voiceProfileUsesDenoised_ stays false and the
+    // caller wires no denoised source, so playback is dry).
+    refreshVoiceProfileFromDenoised();
+    persistDenoisedAudioIfReady();
 
     processedReady_ = false;
     return true;

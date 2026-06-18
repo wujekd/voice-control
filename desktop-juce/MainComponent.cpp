@@ -26,6 +26,7 @@ constexpr int kButtonColWidth = 100;
 constexpr int kControlSectionGap = 3;
 constexpr int kConnectorWidth = 21;
 constexpr int kMusicToggleBarHeight = 26;            // "Add background music" bar
+constexpr int kBottomRowHeight = 18;                 // progress + help row
 constexpr int kMusicSlotWidth = 80;
 constexpr int kMusicSideColWidth = kMusicSlotWidth * 3; // three pot slots per side
 constexpr int kMusicControlsHeight = 116;            // background-music controls row
@@ -44,21 +45,23 @@ constexpr int kCommonWindowHeight = kOuterMargin * 2
     + kMetersSectionHeight + kMetersBottomGap          // meters + gap below
     + (kMainControlsHeight + 8)                      // main controls
     + kSpectrumHeight + kWaveformSectionGap          // spectrum + gap to voice lane
-    + (18)                                           // progress
     + kBottomBreathingRoom;
 // Voice only: timeline shows the voice lane and nothing music-related at all
 // (the "Always off" preference).
 constexpr int kVoiceOnlyWindowHeight = kCommonWindowHeight
-    + (kVoiceLaneHeight + 8 + kVisualPanelPadding * 2);
+    + (kVoiceLaneHeight + 8 + kVisualPanelPadding * 2)
+    + kBottomRowHeight;
 // Collapsed: voice-lane-only timeline plus the slim disclosure bar.
 constexpr int kCollapsedWindowHeight = kVoiceOnlyWindowHeight
+    - kBottomRowHeight
     + (kMusicToggleBarHeight + 8);
 // Expanded: full timeline (voice + music lanes) and the controls row. The
 // disclosure bar disappears entirely — a small "Hide" button in the section
 // header takes over, so no vertical space is wasted on a full-width bar.
 constexpr int kExpandedWindowHeight = kCommonWindowHeight
     + (kTimelineHeight + 8 + kVisualPanelPadding * 2)
-    + (kMusicControlsHeight + 8);
+    + (kMusicControlsHeight + 8)
+    + kBottomRowHeight;
 
 juce::File appDataDir() {
     auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
@@ -649,7 +652,6 @@ MainComponent::MainComponent() {
     musicTimeline_.onAddAt = [this](double seconds) { addMusicClip(seconds); };
     musicTimeline_.onSeek = [this](double seconds) {
         player_.setPositionSeconds(seconds);
-        engine_.setPlayheadFrame(player_.currentSourceFrame()); // prioritize denoise here
     };
     musicTimeline_.onSelectClip = [this](int index) {
         musicClipBox_.setSelectedId(index + 1, juce::sendNotification);
@@ -2065,8 +2067,11 @@ void MainComponent::loadFile(const juce::File& file) {
         },
         [this, file]() {
             player_.setDrySource(&engine_.beforeBuffer(), engine_.sampleRate());
-            player_.setDenoisedSource(engine_.denoisedPlanar(), engine_.denoisedValidHops(),
-                                      engine_.denoisedNumHops(), engine_.denoisedHopSize());
+            // Whole file is denoised at load; wire the complete buffer (or nullptr
+            // if the model was unavailable, in which case playback stays dry).
+            player_.setDenoisedSource(engine_.voiceProfileUsesDenoised()
+                                          ? engine_.denoisedPlanar()
+                                          : nullptr);
             applyParamsLive();
 
             playButton_.setEnabled(true);
@@ -2547,32 +2552,12 @@ void MainComponent::timerCallback() {
         : 0.0;
     musicTimeline_.setPlayheadSeconds(playheadSeconds);
 
-    // Steer the background denoiser toward what's playing.
-    if (engine_.hasAudio())
-        engine_.setPlayheadFrame(player_.currentSourceFrame());
-
     if (autosaveCountdown_ > 0 && --autosaveCountdown_ == 0)
         saveAutosaveSession();
 
-    if (engine_.hasAudio() && !busy_.load(std::memory_order_relaxed)
-        && engine_.refreshVoiceProfileFromDenoised()) {
-        spectrumView_.setSpectrum(engine_.spectrum());
-        updateEqView();
-        updateMusicTimeline();
-        applyParamsLive();
-        statusLabel_.setText("Voice balance updated from denoised vocal profile.",
-                             juce::dontSendNotification);
-    } else if (engine_.hasAudio() && !busy_.load(std::memory_order_relaxed)
-               && !engine_.voiceProfileUsesDenoised()) {
-        statusLabel_.setText("Preparing voice profile in background...",
-                             juce::dontSendNotification);
-    }
-
-    // Once the background denoise finishes, persist the denoised audio so the
-    // next load skips the model entirely. Covers both the fresh-analysis and the
-    // restored-profile-without-audio-cache cases.
-    if (engine_.hasAudio() && !busy_.load(std::memory_order_relaxed))
-        engine_.persistDenoisedAudioIfReady();
+    // The whole file is denoised at load (see ProcessingEngine::loadMedia), so
+    // the denoised vocal profile, auto-EQ and cache are all ready before playback
+    // begins — no mid-playback profile swap or background persist needed here.
 }
 
 void MainComponent::paint(juce::Graphics& g) {
@@ -2720,12 +2705,19 @@ void MainComponent::resized() {
         // "Always hidden": no section and no entry point at all.
         if (musicSectionMode_ != MusicSectionMode::AlwaysOff) {
             // Foldable + collapsed: a small left-aligned button, sitting under the
-            // "Voice" label at the left of the timeline, is the only entry point.
+            // "Voice" label at the left of the timeline, shares its row with
+            // help/progress so the collapsed UI stays compact.
             auto toggleRow = r.removeFromTop(kMusicToggleBarHeight);
-            musicSectionToggle_.setBounds(toggleRow.removeFromLeft(168).withSizeKeepingCentre(168, 22));
+            helpButton_.setBounds(toggleRow.removeFromRight(22).withSizeKeepingCentre(22, 18));
+            toggleRow.removeFromRight(6);
+            auto addMusicArea = toggleRow.removeFromLeft(168);
+            musicSectionToggle_.setBounds(addMusicArea.withSizeKeepingCentre(168, 22));
+            progressBar_.setBounds(toggleRow.withTrimmedTop((kMusicToggleBarHeight - kBottomRowHeight) / 2)
+                                            .withHeight(kBottomRowHeight));
             r.removeFromTop(8);
+            return;
         }
-        layoutBottomRow(r.removeFromTop(18));
+        layoutBottomRow(r.removeFromTop(kBottomRowHeight));
         return;
     }
 
@@ -2775,5 +2767,5 @@ void MainComponent::resized() {
 
     // The Pro controls now live in the settings window (see SettingsComponent),
     // so resized() no longer lays them out here.
-    layoutBottomRow(r.removeFromTop(18));
+    layoutBottomRow(r.removeFromTop(kBottomRowHeight));
 }

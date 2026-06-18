@@ -9,7 +9,6 @@
 #include "Presets.h"            // vc::Preset, vc::Tone, vc::ChainParams
 #include "SpectrumAnalyzer.h"   // vc::SpectrumResult
 
-#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -70,16 +69,9 @@ public:
     float waveformDisplayGain() const;
     double sampleRate() const { return static_cast<double>(original_.sampleRate); }
 
-    // Progressive denoise output for the live preview blend. The planar buffer
-    // and per-hop validity flags are filled in the background; a set flag (read
-    // with acquire) means that hop's denoised samples are visible.
+    // Complete preprocessed denoise output for the live preview blend. The
+    // buffer is populated before playback is enabled.
     const vc::AudioBuffer* denoisedPlanar() const { return &streamer_.denoised(); }
-    const std::atomic<std::uint8_t>* denoisedValidHops() const { return streamer_.validHops(); }
-    int denoisedNumHops() const { return streamer_.numHops(); }
-    int denoisedHopSize() const { return streamer_.hopSize(); }
-
-    // Steer the background denoiser toward the currently-playing source frame.
-    void setPlayheadFrame(std::int64_t frame) { streamer_.setPlayheadFrame(frame); }
 
     // Once the full-file denoise pass has completed, remeasure the balance
     // profile from the 100% denoised voice so auto-EQ ignores room noise/rumble.

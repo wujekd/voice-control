@@ -22,12 +22,10 @@ public:
     PreviewPlayer();
 
     void setDrySource(const juce::AudioBuffer<float>* before, double sourceRate);
-    // Progressive denoise: a planar buffer filled in the background plus per-hop
-    // validity flags. The blend uses a denoised sample only where its hop is
-    // marked valid, falling back to dry elsewhere. Pass nullptrs to disable.
-    void setDenoisedSource(const vc::AudioBuffer* denoised,
-                           const std::atomic<std::uint8_t>* validHops,
-                           int numHops, int hopSize);
+    // Complete denoised buffer (whole file denoised once at load). The blend
+    // mixes it with the dry signal per the noise-reduction amount. Pass nullptr
+    // to disable (e.g. the model was unavailable) and play dry only.
+    void setDenoisedSource(const vc::AudioBuffer* denoised);
     void setMusicClips(const std::vector<MusicClip>& clips);
     void setMusicClipGainDb(int index, double gainDb);
     void setMusicMasterGainDb(double gainDb);
@@ -67,8 +65,8 @@ public:
 
     double getPositionNormalised() const;
     void setPositionSeconds(double seconds);
-    // Current playback position in source frames (a lock-free hint for the
-    // background denoiser; may be a block stale).
+    // Current playback position in source frames for timeline/UI sync. May be a
+    // block stale.
     std::int64_t currentSourceFrame() const {
         return static_cast<std::int64_t>(readPos_);
     }
@@ -97,9 +95,11 @@ private:
     juce::CriticalSection lock_;
     const juce::AudioBuffer<float>* before_ = nullptr;
     const vc::AudioBuffer* denoised_ = nullptr;
-    const std::atomic<std::uint8_t>* denoisedValidHops_ = nullptr;
-    int denoisedNumHops_ = 0;
-    int denoisedHopSize_ = 480;
+    // Smoothed noise-reduction amount, ramped toward the knob target so dragging
+    // the balance doesn't zipper. (The buffer is complete, so there is no
+    // per-hop readiness to gate on anymore.)
+    double blendWet_ = 0.0;
+
     std::vector<MusicClip> musicClips_;
     static constexpr int kMaxLiveMusicClips = 64;
     std::array<std::atomic<float>, kMaxLiveMusicClips> musicGainDb_;

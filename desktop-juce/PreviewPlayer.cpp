@@ -16,14 +16,9 @@ void PreviewPlayer::setDrySource(const juce::AudioBuffer<float>* before, double 
     readPos_ = 0.0;
 }
 
-void PreviewPlayer::setDenoisedSource(const vc::AudioBuffer* denoised,
-                                      const std::atomic<std::uint8_t>* validHops,
-                                      int numHops, int hopSize) {
+void PreviewPlayer::setDenoisedSource(const vc::AudioBuffer* denoised) {
     const juce::ScopedLock sl(lock_);
     denoised_ = denoised;
-    denoisedValidHops_ = validHops;
-    denoisedNumHops_ = numHops;
-    denoisedHopSize_ = hopSize > 0 ? hopSize : 480;
 }
 
 void PreviewPlayer::setMusicClips(const std::vector<MusicClip>& clips) {
@@ -223,40 +218,35 @@ void PreviewPlayer::getNextAudioBlock(const juce::AudioSourceChannelInfo& info) 
     //    The chain always runs so the meters stay live and warm.
     const int procCh = juce::jmin(outChannels, scratch_.getNumChannels());
     const auto* den = denoised_;
-    const auto* valid = denoisedValidHops_;
     const int denLen = (den != nullptr) ? static_cast<int>(den->numFrames()) : 0;
     const float amount = noiseReductionAmount_.load(std::memory_order_relaxed);
-    const bool blend = den != nullptr && denLen > 1 && valid != nullptr && amount > 0.0f;
-    if (!blend) {
+    // The denoised buffer is complete (whole file denoised once at load), so the
+    // blend is a plain dry/wet mix — no per-hop readiness gating. We still ramp
+    // the wet amount toward the knob target so dragging the balance doesn't
+    // zipper; when fully dry the smoothed amount settles at 0 and we short-circuit.
+    const bool canBlend = den != nullptr && denLen > 1;
+    const float target = canBlend ? amount : 0.0f;
+    const double tcMs = 12.0;
+    const double smCoef = 1.0 - std::exp(-1.0 / (deviceRate_ * tcMs * 0.001));
+    if (!canBlend || (target <= 0.0f && blendWet_ < 1e-4)) {
+        blendWet_ = 0.0;
         for (int ch = 0; ch < procCh; ++ch)
             scratch_.copyFrom(ch, 0, *info.buffer, ch, info.startSample, produced);
     } else {
-        const float wet = amount;
-        const float dry = 1.0f - wet;
         const int denChannels = den->numChannels();
-        const int hopSize = denoisedHopSize_;
-        const int numHops = denoisedNumHops_;
         double denPos = readPos_ - produced * ratio;
         for (int i = 0; i < produced; ++i) {
             const int i0 = static_cast<int>(juce::jlimit(0.0, static_cast<double>(denLen - 2), denPos));
             const float frac = static_cast<float>(denPos - i0);
-            // The denoised sample and its interpolation neighbour are only usable
-            // once the worker has filled their hop(s); otherwise fall back to dry.
-            const int h0 = i0 / hopSize;
-            const int h1 = (i0 + 1) / hopSize;
-            const bool ready = h1 < numHops
-                && valid[h0].load(std::memory_order_acquire) != 0
-                && valid[h1].load(std::memory_order_acquire) != 0;
+            blendWet_ += (target - blendWet_) * smCoef;
+            const float w = static_cast<float>(blendWet_);
+            const float d1 = 1.0f - w;
             for (int ch = 0; ch < procCh; ++ch) {
                 const float origSample = info.buffer->getSample(ch, info.startSample + i);
-                if (!ready) {
-                    scratch_.setSample(ch, i, origSample);
-                    continue;
-                }
                 const int dc = juce::jmin(ch, denChannels - 1);
                 const float* d = den->channels[static_cast<std::size_t>(dc)].data();
                 const float denSample = d[i0] + frac * (d[i0 + 1] - d[i0]);
-                scratch_.setSample(ch, i, dry * origSample + wet * denSample);
+                scratch_.setSample(ch, i, d1 * origSample + w * denSample);
             }
             denPos += ratio;
         }
