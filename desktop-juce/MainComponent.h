@@ -78,6 +78,17 @@ private:
         std::unordered_set<juce::Slider*> softDisabledSliders_;
     };
 
+    class UtilityIconButton final : public juce::Button {
+    public:
+        enum class Icon { Projects, Settings };
+
+        UtilityIconButton(const juce::String& name, Icon icon) : juce::Button(name), icon_(icon) {}
+        void paintButton(juce::Graphics& g, bool highlighted, bool down) override;
+
+    private:
+        Icon icon_;
+    };
+
     void loadFile(const juce::File& file);
     void applyParamsLive();
     void doExport();
@@ -98,6 +109,7 @@ private:
     void updateMusicTimeline();
     void togglePlay();
     void updateListenButton();
+    void syncEffectiveMusicMute();
     void updateDuckingUi();
     void updateMusicMuteUi();
     // Fold the background-music section (timeline music lane + controls) in or
@@ -222,6 +234,8 @@ private:
     // Preference control (re-parented into the settings window's General tab).
     juce::Label musicSectionModeLabel_;
     juce::ComboBox musicSectionModeBox_;
+    juce::ToggleButton muteMusicWhenHiddenButton_ { "Mute background music when hidden" };
+    bool muteMusicWhenHidden_ = true;
     juce::TextButton addMusicButton_ { "Add music..." };
     juce::TextButton removeMusicButton_ { "Remove" };
     juce::ComboBox musicClipBox_;
@@ -269,6 +283,8 @@ private:
     void applyMusicClipOverlapCrossfades(int draggedIndex);
     bool analyzingMedia_ = false;
     juce::TextButton exportButton_ { "Export" };
+    UtilityIconButton projectsButton_ { "Projects", UtilityIconButton::Icon::Projects };
+    UtilityIconButton settingsButton_ { "Settings", UtilityIconButton::Icon::Settings };
     juce::Label statusLabel_;
 
     CompMeter compMeter_ { "Comp", 12.0f, juce::Colour(0xff6ee07a), juce::Colour(0xff58b8e8) };

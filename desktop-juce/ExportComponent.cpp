@@ -6,7 +6,7 @@ ExportComponent::ExportComponent(const juce::File& sourceFile, bool sourceHasVid
     // Audio codecs are inferred downstream from the extension by
     // FFmpeg::encodeAudio (wav is written directly).
     if (sourceHasVideo)
-        formats_.push_back({ "Video \xE2\x80\x94 MP4 (H.264 + AAC)", "mp4", true });
+        formats_.push_back({ "Video - MP4 (H.264 + AAC)", "mp4", true });
     formats_.push_back({ "WAV (lossless)", "wav", false });
     formats_.push_back({ "MP3", "mp3", false });
     formats_.push_back({ "M4A (AAC)", "m4a", false });

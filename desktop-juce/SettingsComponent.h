@@ -17,6 +17,7 @@ public:
     // the background-music behaviour combo, the "follow system" toggle and the
     // output-device chooser.
     void setGeneralControls(juce::Label& musicModeLabel, juce::ComboBox& musicModeBox,
+                            juce::ToggleButton& muteWhenHidden,
                             juce::ToggleButton& followSystem,
                             juce::Label& outputLabel, juce::ComboBox& outputBox);
 

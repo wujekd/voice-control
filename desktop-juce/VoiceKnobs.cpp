@@ -430,6 +430,8 @@ void AppLookAndFeel::drawProgressBar(juce::Graphics& g, juce::ProgressBar& bar, 
 }
 
 PanelButtonLookAndFeel::PanelButtonLookAndFeel() {
+    setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b211c));
+    setColour(juce::TextButton::buttonOnColourId, kAccent);
     setColour(juce::TextButton::textColourOffId, kReadout);
     setColour(juce::TextButton::textColourOnId, juce::Colour(0xff0c140d));
 }
@@ -441,7 +443,10 @@ void PanelButtonLookAndFeel::drawButtonBackground(juce::Graphics& g, juce::Butto
     const bool on = button.getToggleState();
     const bool enabled = button.isEnabled();
 
-    juce::Colour base = on ? kAccent : juce::Colour(0xff1b211c);
+    juce::Colour base = on ? button.findColour(juce::TextButton::buttonOnColourId)
+                           : button.findColour(juce::TextButton::buttonColourId);
+    if (base.isTransparent())
+        base = on ? kAccent : juce::Colour(0xff1b211c);
     if (isDown)
         base = base.brighter(0.12f);
     else if (isOver)

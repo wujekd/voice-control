@@ -389,7 +389,7 @@ MainComponent::MainComponent() {
     styleMainKnob(noiseReductionSlider_, neuralKnobLnf_);
     noiseReductionSlider_.onValueChange = [this] {
         applyParamsLive();
-        if (!player_.isPlaying() && noiseReductionSlider_.isEnabled())
+        if (!listenButton_.getToggleState() && !player_.isPlaying() && noiseReductionSlider_.isEnabled())
             noiseNetPanel_.triggerPreviewBurst();
     };
     addAndMakeVisible(noiseReductionSlider_);
@@ -474,7 +474,7 @@ MainComponent::MainComponent() {
     musicMuteButton_.setTooltip("Mute background music (voice only)");
     musicMuteButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb24a4a));
     musicMuteButton_.onClick = [this] {
-        player_.setMusicMuted(musicMuteButton_.getToggleState());
+        syncEffectiveMusicMute();
         updateMusicMuteUi();
     };
     addAndMakeVisible(musicMuteButton_);
@@ -623,6 +623,16 @@ MainComponent::MainComponent() {
         setMusicSectionMode(static_cast<MusicSectionMode>(musicSectionModeBox_.getSelectedId() - 1));
     };
 
+    muteMusicWhenHidden_ = globalPrefs().getBoolValue("muteMusicWhenHidden", true);
+    muteMusicWhenHiddenButton_.setToggleState(muteMusicWhenHidden_, juce::dontSendNotification);
+    muteMusicWhenHiddenButton_.setTooltip("Silence background music while the music section is hidden");
+    muteMusicWhenHiddenButton_.onClick = [this] {
+        muteMusicWhenHidden_ = muteMusicWhenHiddenButton_.getToggleState();
+        globalPrefs().setValue("muteMusicWhenHidden", muteMusicWhenHidden_);
+        globalPrefs().saveIfNeeded();
+        syncEffectiveMusicMute();
+    };
+
     // Help: the "?" button mirrors the Help menu's "User Guide".
     helpButton_.setWantsKeyboardFocus(false);
     helpButton_.setTooltip("Open the user guide");
@@ -636,6 +646,7 @@ MainComponent::MainComponent() {
         b->setLookAndFeel(&buttonLnf_);
 
     captureSectionChromeBaselines();
+    syncEffectiveMusicMute();
     updateMusicMuteUi();
     updateDuckingUi();
     applyMusicSectionMode();
@@ -702,11 +713,36 @@ MainComponent::MainComponent() {
         updateMusicTimeline();
         markProjectDirty();
     };
+    musicTimeline_.onAdjustClipGain = [this](int index, double gainDb) {
+        const auto& clips = engine_.musicClips();
+        if (index < 0 || index >= static_cast<int>(clips.size()))
+            return;
+        const auto& clip = clips[static_cast<std::size_t>(index)];
+        engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, gainDb,
+                                   clip.fadeInSeconds, clip.fadeOutSeconds, clip.durationSeconds());
+        player_.setMusicClipGainDb(index, gainDb);
+        if (musicClipBox_.getSelectedId() != index + 1)
+            musicClipBox_.setSelectedId(index + 1, juce::dontSendNotification);
+        musicVolumeSlider_.setValue(gainDb, juce::dontSendNotification);
+        updateMusicTimeline();
+        updateMusicMuteUi();
+        markProjectDirty();
+    };
     addAndMakeVisible(musicTimeline_);
 
     exportButton_.onClick = [this] { doExport(); };
     exportButton_.setWantsKeyboardFocus(false);
     addAndMakeVisible(exportButton_);
+
+    projectsButton_.setWantsKeyboardFocus(false);
+    projectsButton_.setTooltip("Open projects");
+    projectsButton_.onClick = [this] { openProjectManager(); };
+    addAndMakeVisible(projectsButton_);
+
+    settingsButton_.setWantsKeyboardFocus(false);
+    settingsButton_.setTooltip("Open settings");
+    settingsButton_.onClick = [this] { openSettings(); };
+    addAndMakeVisible(settingsButton_);
 
     // The bottom status line was redundant with the progress bar / busy state,
     // so statusLabel_ is no longer shown (setText calls below are harmless).
@@ -815,6 +851,65 @@ double MainComponent::currentIntensity() const {
     return juce::jlimit(0.1, 1.0, 0.1 + 0.9 * (strengthSlider_.getValue() - min) / range);
 }
 
+void MainComponent::UtilityIconButton::paintButton(juce::Graphics& g, bool highlighted, bool down) {
+    auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+    constexpr float radius = 6.0f;
+    juce::Colour base(0xff1b211c);
+    if (down)
+        base = base.brighter(0.12f);
+    else if (highlighted)
+        base = base.brighter(0.06f);
+    if (!isEnabled())
+        base = base.withMultipliedAlpha(0.45f);
+
+    juce::ColourGradient grad(base.brighter(0.06f), bounds.getX(), bounds.getY(),
+                              base.darker(0.35f), bounds.getX(), bounds.getBottom(), false);
+    g.setGradientFill(grad);
+    g.fillRoundedRectangle(bounds, radius);
+    g.setColour(juce::Colour(0xff6ee07a).withAlpha(isEnabled() ? 0.40f : 0.20f));
+    g.drawRoundedRectangle(bounds, radius, 1.2f);
+
+    auto icon = bounds.withSizeKeepingCentre(juce::jmin(18.0f, bounds.getWidth() - 10.0f),
+                                             juce::jmin(18.0f, bounds.getHeight() - 8.0f));
+    g.setColour(isEnabled() ? juce::Colour(0xffd6ffdc) : juce::Colour(0xffd6ffdc).withAlpha(0.5f));
+
+    if (icon_ == Icon::Projects) {
+        auto tab = icon.withTrimmedBottom(icon.getHeight() * 0.62f);
+        tab.setWidth(icon.getWidth() * 0.46f);
+        tab.setHeight(icon.getHeight() * 0.28f);
+        tab.setX(icon.getX() + icon.getWidth() * 0.08f);
+        tab.setY(icon.getY() + icon.getHeight() * 0.15f);
+        auto folder = icon.withTrimmedTop(icon.getHeight() * 0.32f)
+                          .withTrimmedBottom(icon.getHeight() * 0.12f)
+                          .reduced(1.0f, 0.0f);
+        g.fillRoundedRectangle(tab, 1.6f);
+        g.fillRoundedRectangle(folder, 2.2f);
+        g.setColour(juce::Colour(0xff0c140d).withAlpha(0.28f));
+        g.drawRoundedRectangle(folder.reduced(0.8f), 1.8f, 1.0f);
+        return;
+    }
+
+    const auto c = icon.getCentre();
+    const float outer = icon.getWidth() * 0.42f;
+    const float inner = icon.getWidth() * 0.22f;
+    juce::Path gear;
+    constexpr int teeth = 8;
+    for (int i = 0; i < teeth * 2; ++i) {
+        const float a = juce::MathConstants<float>::twoPi * static_cast<float>(i) / static_cast<float>(teeth * 2)
+                      - juce::MathConstants<float>::halfPi;
+        const float r = (i % 2 == 0) ? outer : outer * 0.76f;
+        const auto p = c + juce::Point<float>(std::cos(a), std::sin(a)) * r;
+        if (i == 0)
+            gear.startNewSubPath(p);
+        else
+            gear.lineTo(p);
+    }
+    gear.closeSubPath();
+    g.fillPath(gear);
+    g.setColour(juce::Colour(0xff0c140d));
+    g.fillEllipse(juce::Rectangle<float>(inner * 2.0f, inner * 2.0f).withCentre(c));
+}
+
 vc::ChainParams MainComponent::buildParams() const {
     auto p = vc::fixedVoiceCleanupParams();
     p.tone = vc::Tone::Natural;
@@ -919,6 +1014,7 @@ void MainComponent::applySelectedMusicClipVolume() {
     engine_.setMusicClipParams(index, clip.startSeconds, clip.sourceOffsetSeconds, gainDb,
                                clip.fadeInSeconds, clip.fadeOutSeconds, clip.durationSeconds());
     player_.setMusicClipGainDb(index, gainDb);
+    updateMusicTimeline();
     markProjectDirty();
 }
 
@@ -1205,7 +1301,7 @@ juce::String MainComponent::buildProjectInfoText() const {
 
     lines.add("AUTO-EQ (derived from the voice spectrum)");
     if (p.autoEqBands.empty()) {
-        lines.add("  (no corrective bands — spectrum already balanced)");
+        lines.add("  (no corrective bands - spectrum already balanced)");
     } else {
         for (const auto& b : p.autoEqBands) {
             const char* type = b.type == vc::EqBand::Type::LowShelf  ? "Low shelf "
@@ -1238,7 +1334,7 @@ void MainComponent::openSettings() {
             version = app->getApplicationVersion();
         content->setAboutInfo(version);
     }
-    content->setGeneralControls(musicSectionModeLabel_, musicSectionModeBox_,
+    content->setGeneralControls(musicSectionModeLabel_, musicSectionModeBox_, muteMusicWhenHiddenButton_,
                                 followSystemButton_, outputDeviceLabel_, outputDeviceBox_);
     content->setProControls({
         { "LEVEL",
@@ -2031,7 +2127,7 @@ void MainComponent::loadFile(const juce::File& file) {
     musicClipBox_.clear(juce::dontSendNotification);
     updateMusicTimeline();
     analyzingMedia_ = true;
-    dropArea_.setStatus("Analyzing " + file.getFileName() + "\nMeasuring level and voice profile");
+    dropArea_.setStatus("Analysing voice and cleaning noise");
     const auto params = buildParams();
     engine_.setProjectAnalysisCache(pendingProjectAnalysisCache_);
     pendingProjectAnalysisCache_ = juce::var();
@@ -2090,7 +2186,7 @@ void MainComponent::loadFile(const juce::File& file) {
             const double target = buildParams().targetLufs;
             analyzingMedia_ = false;
             const auto loadedMessage = juce::String::formatted(
-                "Loaded \"%s\"  -  denoising in background, input %.1f LUFS, target %.0f LUFS.",
+                "Loaded \"%s\"  -  voice analysed, input %.1f LUFS, target %.0f LUFS.",
                 file.getFileName().toRawUTF8(), engine_.inputLufs(), target);
             if (restoringProject_) {
                 restorePendingMusicClipsAfterVoiceLoad(file, loadedMessage);
@@ -2238,19 +2334,42 @@ void MainComponent::updateListenButton() {
     listenButton_.setButtonText("Bypass");
     // Active bypass glows a muted, faded red (echoing the timeline's washed-out clips);
     // inactive falls back to the neutral button grey.
-    const auto col = bypass ? juce::Colour(0xff7d2f2f) : juce::Colour(0xff3a3f49);
+    const auto col = bypass ? juce::Colour(0xff7d2f2f).withAlpha(0.72f) : juce::Colour(0xff3a3f49);
     listenButton_.setColour(juce::TextButton::buttonColourId, col);
     listenButton_.setColour(juce::TextButton::buttonOnColourId, col);
+    listenButton_.setColour(juce::TextButton::textColourOnId,
+                            bypass ? juce::Colour(0xffffdddd) : juce::Colour(0xff0c140d));
+
+    const float processingAlpha = bypass ? 0.34f : 1.0f;
+    for (auto* component : { static_cast<juce::Component*>(&meterPanel_),
+                             static_cast<juce::Component*>(&compMeter_),
+                             static_cast<juce::Component*>(&deEssMeter_),
+                             static_cast<juce::Component*>(&limiterMeter_),
+                             static_cast<juce::Component*>(&vuMeter_),
+                             static_cast<juce::Component*>(&toneCaption_),
+                             static_cast<juce::Component*>(&toneSlider_),
+                             static_cast<juce::Component*>(&toneValueLabel_),
+                             static_cast<juce::Component*>(&strengthCaption_),
+                             static_cast<juce::Component*>(&strengthSlider_),
+                             static_cast<juce::Component*>(&noiseReductionCaption_),
+                             static_cast<juce::Component*>(&noiseReductionSlider_),
+                             static_cast<juce::Component*>(&noiseNetPanel_) }) {
+        component->setAlpha(processingAlpha);
+        component->repaint();
+    }
+
+    listenButton_.repaint();
 }
 
 void MainComponent::setMusicSectionExpanded(bool expanded) {
     musicSectionExpanded_ = expanded;
+    syncEffectiveMusicMute();
 
     // The disclosure bar and the "Hide" header button only exist in Foldable
     // mode. "Always shown" keeps the section open with no way to fold it; "Always
     // hidden" never shows the section or its entry point.
     const bool foldable = musicSectionMode_ == MusicSectionMode::Foldable;
-    musicSectionToggle_.setButtonText(juce::String::fromUTF8("▸  Add background music"));
+    musicSectionToggle_.setButtonText("+ Add background music");
     musicSectionToggle_.setVisible(!expanded && foldable);
     musicHideButton_.setVisible(expanded && foldable);
 
@@ -2276,6 +2395,12 @@ void MainComponent::setMusicSectionExpanded(bool expanded) {
     applyWindowConstraints(); // relock the window to the new fixed height
     resized();
     repaint();
+}
+
+void MainComponent::syncEffectiveMusicMute() {
+    const bool mutedByButton = musicMuteButton_.getToggleState();
+    const bool mutedByHiddenSection = muteMusicWhenHidden_ && !musicSectionExpanded_;
+    player_.setMusicMuted(mutedByButton || mutedByHiddenSection);
 }
 
 void MainComponent::applyMusicSectionMode() {
@@ -2315,41 +2440,41 @@ void MainComponent::openHelp() {
     body->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
     body->setColour(juce::TextEditor::textColourId, juce::Colours::white.withAlpha(0.88f));
     body->setText(juce::String::fromUTF8(
-        "Voice Control — User Guide\n"
+        "Voice Control - User Guide\n"
         "================================\n\n"
         "1. Load a voice recording\n"
         "   Drag an audio or video file onto the Voice lane (or click it to "
         "browse). Voice Control analyses the file, then plays it back cleaned up "
         "in real time.\n\n"
         "2. Shape the voice\n"
-        "   • Strength — how hard the cleanup chain works overall.\n"
-        "   • Tone — darker to brighter tonal balance.\n"
-        "   • Noise reduction — how much background noise is removed.\n"
+        "   - Strength: how hard the cleanup chain works overall.\n"
+        "   - Tone: darker to brighter tonal balance.\n"
+        "   - Noise reduction: how much background noise is removed.\n"
         "   Press Play (or the spacebar) to audition. Use Bypass to compare with "
         "the untouched original. The meters show compression, de-essing, limiting "
         "and output level.\n\n"
         "3. Add background music (optional)\n"
-        "   Click “Add background music” to reveal the music lane and its "
+        "   Click Add background music to reveal the music lane and its "
         "controls, then drop a music file onto the Background lane. Drag clips to "
         "move them, drag the edges to trim, and drag the top corners to set "
         "fades.\n"
-        "   • Volume / Clip volume — overall and per-clip levels.\n"
-        "   • Mute — silence the music to check the voice alone.\n"
-        "   • Auto volume — automatically dips the music under the voice. "
+        "   - Volume / Clip volume: overall and per-clip levels.\n"
+        "   - Mute: silence the music to check the voice alone.\n"
+        "   - Auto volume: automatically dips the music under the voice. "
         "Tune look-ahead, reduction and mid-focus.\n"
-        "   Use Hide to fold the section away again. In Settings › General you "
+        "   Use Hide to fold the section away again. In Settings > General you "
         "can make the section always shown, always hidden, or foldable.\n\n"
         "4. Export\n"
         "   Click Export to render the result. If the source was a video, the "
         "cleaned audio is muxed back into it.\n\n"
         "5. Projects\n"
-        "   Work is autosaved. Use File › Projects to manage saved sessions; "
-        "File › Save Project to store the current one.\n\n"
+        "   Work is autosaved. Use File > Projects to manage saved sessions; "
+        "File > Save Project to store the current one.\n\n"
         "Keyboard shortcuts\n"
-        "   Space — Play / pause\n"
-        "   Cmd/Ctrl+N — New project\n"
-        "   Cmd/Ctrl+O — Open projects\n"
-        "   Cmd/Ctrl+S — Save project\n"),
+        "   Space - Play / pause\n"
+        "   Cmd/Ctrl+N - New project\n"
+        "   Cmd/Ctrl+O - Open projects\n"
+        "   Cmd/Ctrl+S - Save project\n"),
         juce::dontSendNotification);
 
     auto content = std::make_unique<HelpContent>();
@@ -2476,8 +2601,9 @@ void MainComponent::updateMusicMuteUi() {
 }
 
 void MainComponent::setUiBusy(bool busy, const juce::String& message) {
-    progressBar_.setVisible(busy);
+    progressBar_.setVisible(busy && !analyzingMedia_);
     progress_ = busy ? -1.0 : 0.0; // negative -> indeterminate animation
+    dropArea_.setBusy(busy && analyzingMedia_);
 
     const bool haveAudio = engine_.hasAudio();
     dropArea_.setVisible(analyzingMedia_ || !haveAudio);
@@ -2496,8 +2622,9 @@ void MainComponent::setUiBusy(bool busy, const juce::String& message) {
 
 void MainComponent::timerCallback() {
     const bool playing = player_.isPlaying();
-    noiseNetPanel_.setPlaybackActive(playing);
-    signalConnector_.setPlaybackActive(playing);
+    const bool processingAudible = playing && !listenButton_.getToggleState();
+    noiseNetPanel_.setPlaybackActive(processingAudible);
+    signalConnector_.setPlaybackActive(processingAudible);
     playButton_.setButtonText(playing ? "Stop" : "Play");
     // Gentle green backlight while playing (matching the encoders' green); neutral grey otherwise.
     const auto playCol = playing ? juce::Colour(0xff2f7d52) : juce::Colour(0xff3a3f49);
@@ -2505,16 +2632,16 @@ void MainComponent::timerCallback() {
     playButton_.setColour(juce::TextButton::buttonOnColourId, playCol);
 
     // Meters reflect the live chain while playing; ease back to 0 when stopped.
-    compMeter_.setReductions(playing ? player_.glueCompReductionDb() : 0.0f,
-                             playing ? player_.fastCompReductionDb() : 0.0f);
-    deEssMeter_.setReduction(playing ? player_.deEssReductionDb() : 0.0f);
-    limiterMeter_.setReduction(playing ? player_.limiterReductionDb() : 0.0f);
-    spectrumView_.setLimiterReductionDb(playing ? player_.limiterReductionDb() : 0.0f);
-    spectrumView_.setDeEssReductionDb(playing ? player_.deEssReductionDb() : 0.0f);
-    spectrumView_.setCompReductionDb(playing ? player_.glueCompReductionDb() : 0.0f,
-                                     playing ? player_.fastCompReductionDb() : 0.0f);
-    vuMeter_.setLevels(playing ? player_.rmsLevelDb() : -60.0f,
-                       playing ? player_.peakLevelDb() : -60.0f);
+    compMeter_.setReductions(processingAudible ? player_.glueCompReductionDb() : 0.0f,
+                             processingAudible ? player_.fastCompReductionDb() : 0.0f);
+    deEssMeter_.setReduction(processingAudible ? player_.deEssReductionDb() : 0.0f);
+    limiterMeter_.setReduction(processingAudible ? player_.limiterReductionDb() : 0.0f);
+    spectrumView_.setLimiterReductionDb(processingAudible ? player_.limiterReductionDb() : 0.0f);
+    spectrumView_.setDeEssReductionDb(processingAudible ? player_.deEssReductionDb() : 0.0f);
+    spectrumView_.setCompReductionDb(processingAudible ? player_.glueCompReductionDb() : 0.0f,
+                                     processingAudible ? player_.fastCompReductionDb() : 0.0f);
+    vuMeter_.setLevels(processingAudible ? player_.rmsLevelDb() : -60.0f,
+                       processingAudible ? player_.peakLevelDb() : -60.0f);
 
     // Music-output monitor always runs; the duck curve only draws when enabled.
     const bool duckingOn = duckOnOffButton_.getToggleState();
@@ -2630,7 +2757,17 @@ void MainComponent::resized() {
     mainTransport.removeFromBottom(8);
     playButton_.setBounds(mainTransport);
 
-    exportButton_.setBounds(exportArea.reduced(2, 4));
+    auto exportControls = exportArea.reduced(2, 4);
+    auto utilityRow = exportControls.removeFromBottom(36);
+    exportControls.removeFromBottom(8);
+    exportButton_.setBounds(exportControls);
+    utilityRow.removeFromLeft(1);
+    utilityRow.removeFromRight(1);
+    const int utilityGap = 6;
+    const int utilityW = (utilityRow.getWidth() - utilityGap) / 2;
+    projectsButton_.setBounds(utilityRow.removeFromLeft(utilityW));
+    utilityRow.removeFromLeft(utilityGap);
+    settingsButton_.setBounds(utilityRow);
 
     // Intensity + Tone: three equal gaps (left, between knobs, right).
     {

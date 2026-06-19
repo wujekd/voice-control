@@ -79,16 +79,16 @@ void SettingsComponent::setAboutInfo(const juce::String& version) {
         const char* url;
     };
     const CreditSpec specs[] = {
-        { "Noise reduction — DeepFilterNet",
-          "Real-time speech enhancement by H. Schröter et al.  ·  MIT / Apache-2.0",
+        { "Noise reduction - DeepFilterNet",
+          "Real-time speech enhancement by H. Schroeter et al., MIT / Apache-2.0",
           "github.com/Rikorose/DeepFilterNet",
           "https://github.com/Rikorose/DeepFilterNet" },
-        { "Audio app framework — JUCE",
-          "UI and audio engine  ·  juce.com",
+        { "Audio app framework - JUCE",
+          "UI and audio engine, juce.com",
           "juce.com",
           "https://juce.com" },
-        { "Audio/video I/O — FFmpeg",
-          "Media import and export  ·  ffmpeg.org",
+        { "Audio/video I/O - FFmpeg",
+          "Media import and export, ffmpeg.org",
           "ffmpeg.org",
           "https://ffmpeg.org" },
     };
@@ -149,6 +149,7 @@ void SettingsComponent::setAboutInfo(const juce::String& version) {
 
 void SettingsComponent::setGeneralControls(juce::Label& musicModeLabel,
                                            juce::ComboBox& musicModeBox,
+                                           juce::ToggleButton& muteWhenHidden,
                                            juce::ToggleButton& followSystem,
                                            juce::Label& outputLabel,
                                            juce::ComboBox& outputBox) {
@@ -167,10 +168,11 @@ void SettingsComponent::setGeneralControls(juce::Label& musicModeLabel,
                      static_cast<juce::Component*>(&generalSeparator_),
                      static_cast<juce::Component*>(&musicHeader_),
                      static_cast<juce::Component*>(&musicModeLabel),
-                     static_cast<juce::Component*>(&musicModeBox) })
+                     static_cast<juce::Component*>(&musicModeBox),
+                     static_cast<juce::Component*>(&muteWhenHidden) })
         generalPage_.addAndMakeVisible(*c);
 
-    generalPage_.layout = [this, &musicModeLabel, &musicModeBox, &followSystem,
+    generalPage_.layout = [this, &musicModeLabel, &musicModeBox, &muteWhenHidden, &followSystem,
                            &outputLabel, &outputBox](juce::Rectangle<int> r) {
         r.reduce(16, 16);
 
@@ -192,6 +194,8 @@ void SettingsComponent::setGeneralControls(juce::Label& musicModeLabel,
         auto modeRow = r.removeFromTop(26);
         musicModeLabel.setBounds(modeRow.removeFromLeft(150));
         musicModeBox.setBounds(modeRow.removeFromLeft(220));
+        r.removeFromTop(8);
+        muteWhenHidden.setBounds(r.removeFromTop(24));
     };
 
     // The page already has its bounds (set when added to the tabs); lay the

@@ -15,6 +15,7 @@ public:
     std::function<void(int, bool)> onClipDragStateChanged;
     std::function<void(int, double, double, double)> onMoveOrResizeClip;
     std::function<void(int, double, double)> onAdjustClipFades;
+    std::function<void(int, double)> onAdjustClipGain;
     std::function<void(double)> onSeek;
 
     void setVoice(const juce::AudioBuffer<float>* voice, double sampleRate);
@@ -33,12 +34,14 @@ public:
     bool tickAnimation();
 
     void paint(juce::Graphics& g) override;
+    void mouseMove(const juce::MouseEvent& e) override;
+    void mouseExit(const juce::MouseEvent& e) override;
     void mouseDown(const juce::MouseEvent& e) override;
     void mouseDrag(const juce::MouseEvent& e) override;
     void mouseUp(const juce::MouseEvent& e) override;
 
 private:
-    enum class DragMode { None, Move, Slip, ResizeLeft, ResizeRight, FadeIn, FadeOut };
+    enum class DragMode { None, Move, Slip, ResizeLeft, ResizeRight, FadeIn, FadeOut, Gain };
 
     double secondsToX(double seconds) const;
     double xToSeconds(double x) const;
@@ -53,6 +56,7 @@ private:
     int clipAt(juce::Point<float> p) const;
     bool removeButtonAt(juce::Point<float> p, int& index) const;
     bool fadeHandleAt(juce::Point<float> p, int& index, DragMode& mode) const;
+    bool gainEnvelopeAt(juce::Point<float> p, int& index) const;
     bool plusAt(juce::Point<float> p, double& seconds) const;
     void drawWaveform(juce::Graphics& g, juce::Rectangle<float> area);
     void drawWaveformPeaks(juce::Graphics& g, juce::Rectangle<float> area,
@@ -77,7 +81,9 @@ private:
     double dragLengthSeconds_ = 0.0;
     double dragFadeInSeconds_ = 0.0;
     double dragFadeOutSeconds_ = 0.0;
+    double dragGainDb_ = 0.0;
     double dragMouseSeconds_ = 0.0;
+    float dragMouseY_ = 0.0f;
     bool scrubbing_ = false;
     bool hadProcessedVoicePeaks_ = false;
     float voiceWaveformTransition_ = 1.0f;

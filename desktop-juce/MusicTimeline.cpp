@@ -8,6 +8,11 @@ constexpr float kClipEdgeGripTopInset = 16.0f;
 constexpr float kClipEdgeGripWidth = 7.0f;
 constexpr float kClipEdgeHitTopInset = 10.0f;
 constexpr float kClipEdgeHitWidth = 16.0f;
+constexpr float kClipEnvelopeTopInset = 13.0f;
+constexpr float kClipEnvelopeLowBottomInset = 24.0f;
+constexpr float kClipEnvelopeSilentBottomInset = 8.0f;
+constexpr double kClipGainMinDb = -60.0;
+constexpr double kClipGainMaxDb = 6.0;
 constexpr float kVoiceLaneHeight = 96.0f;
 constexpr int kMusicLaneHeight = 88;
 constexpr float kLaneGap = 4.0f;
@@ -17,6 +22,18 @@ void drawLaneLabel(juce::Graphics& g, juce::Rectangle<float> lane, const juce::S
                                         150.0f, 20.0f);
     g.setColour(juce::Colour(0xffa8b0bd).withAlpha(0.88f));
     g.drawText(text, label, juce::Justification::centredLeft);
+}
+
+float clipGainVisualLevel(double gainDb) {
+    const double clamped = juce::jlimit(kClipGainMinDb, kClipGainMaxDb, gainDb);
+    return static_cast<float>((clamped - kClipGainMinDb) / (kClipGainMaxDb - kClipGainMinDb));
+}
+
+float clipEnvelopeTopY(juce::Rectangle<float> area, const MusicClip& clip) {
+    const float highY = area.getY() + kClipEnvelopeTopInset;
+    const float lowY = std::max(highY, area.getBottom() - kClipEnvelopeLowBottomInset);
+    const float level = clipGainVisualLevel(clip.gainDb);
+    return highY + (1.0f - level) * (lowY - highY);
 }
 }
 
@@ -144,7 +161,7 @@ juce::Point<float> MusicTimeline::fadeInHandlePosition(int index) const {
     const auto& clip = (*clips_)[static_cast<std::size_t>(index)];
     auto b = clipBounds(index);
     const double fade = juce::jlimit(0.0, clip.durationSeconds(), clip.fadeInSeconds);
-    return { static_cast<float>(secondsToX(clip.startSeconds + fade)), b.getY() + 9.0f };
+    return { static_cast<float>(secondsToX(clip.startSeconds + fade)), clipEnvelopeTopY(b, clip) };
 }
 
 juce::Point<float> MusicTimeline::fadeOutHandlePosition(int index) const {
@@ -154,7 +171,7 @@ juce::Point<float> MusicTimeline::fadeOutHandlePosition(int index) const {
     auto b = clipBounds(index);
     const double length = clip.durationSeconds();
     const double fade = juce::jlimit(0.0, length, clip.fadeOutSeconds);
-    return { static_cast<float>(secondsToX(clip.startSeconds + length - fade)), b.getY() + 9.0f };
+    return { static_cast<float>(secondsToX(clip.startSeconds + length - fade)), clipEnvelopeTopY(b, clip) };
 }
 
 int MusicTimeline::clipAt(juce::Point<float> p) const {
@@ -193,6 +210,34 @@ bool MusicTimeline::fadeHandleAt(juce::Point<float> p, int& index, DragMode& mod
         if (p.getDistanceFrom(fadeOutHandlePosition(i)) <= handleRadius) {
             index = i;
             mode = DragMode::FadeOut;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MusicTimeline::gainEnvelopeAt(juce::Point<float> p, int& index) const {
+    if (clips_ == nullptr)
+        return false;
+
+    constexpr float hitRadius = 6.0f;
+    for (int i = static_cast<int>(clips_->size()) - 1; i >= 0; --i) {
+        const auto& clip = (*clips_)[static_cast<std::size_t>(i)];
+        const auto b = clipBounds(i);
+        if (b.isEmpty())
+            continue;
+
+        const double length = std::max(0.001, clip.durationSeconds());
+        const double fadeIn = juce::jlimit(0.0, length, clip.fadeInSeconds);
+        const double fadeOut = juce::jlimit(0.0, length, clip.fadeOutSeconds);
+        const float x0 = static_cast<float>(secondsToX(clip.startSeconds + fadeIn));
+        const float x1 = static_cast<float>(secondsToX(clip.startSeconds + length - fadeOut));
+        if (x1 - x0 < 8.0f)
+            continue;
+
+        const float y = clipEnvelopeTopY(b, clip);
+        if (p.x >= x0 && p.x <= x1 && std::abs(p.y - y) <= hitRadius) {
+            index = i;
             return true;
         }
     }
@@ -330,7 +375,7 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
     if (columns <= 0)
         return;
 
-    g.setColour(juce::Colour(0xb8ffffff));
+    g.setColour(juce::Colour(0xa8ffffff));
     const float midY = wave.getCentreY();
     const float halfH = wave.getHeight() * 0.42f;
     const int pixelColumns = std::max(1, static_cast<int>(wave.getWidth()));
@@ -371,8 +416,8 @@ void MusicTimeline::drawClipFadeOverlay(juce::Graphics& g, const MusicClip& clip
     const double fadeOut = juce::jlimit(0.0, length, clip.fadeOutSeconds);
     const float x0 = area.getX();
     const float x1 = area.getRight();
-    const float yFull = area.getY() + 9.0f;
-    const float ySilent = area.getBottom() - 8.0f;
+    const float yFull = clipEnvelopeTopY(area, clip);
+    const float ySilent = area.getBottom() - kClipEnvelopeSilentBottomInset;
     const float inX = static_cast<float>(secondsToX(clip.startSeconds + fadeIn));
     const float outX = static_cast<float>(secondsToX(clip.startSeconds + length - fadeOut));
 
@@ -600,6 +645,18 @@ void MusicTimeline::paint(juce::Graphics& g) {
                playheadX, timelineBounds().getBottom(), 2.5f);
 }
 
+void MusicTimeline::mouseMove(const juce::MouseEvent& e) {
+    int gainIndex = -1;
+    if (gainEnvelopeAt(e.position, gainIndex))
+        setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
+    else
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
+void MusicTimeline::mouseExit(const juce::MouseEvent&) {
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
 void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
     const auto p = e.position;
     double addSeconds = 0.0;
@@ -634,6 +691,29 @@ void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
         return;
     }
 
+    int gainIndex = -1;
+    if (gainEnvelopeAt(p, gainIndex)) {
+        draggingIndex_ = gainIndex;
+        selectedIndex_ = gainIndex;
+        if (onSelectClip)
+            onSelectClip(gainIndex);
+        if (onClipEditStarted)
+            onClipEditStarted(gainIndex);
+        const auto& clip = (*clips_)[static_cast<std::size_t>(gainIndex)];
+        dragStartSeconds_ = clip.startSeconds;
+        dragSourceOffsetSeconds_ = clip.sourceOffsetSeconds;
+        dragLengthSeconds_ = clip.durationSeconds();
+        dragFadeInSeconds_ = clip.fadeInSeconds;
+        dragFadeOutSeconds_ = clip.fadeOutSeconds;
+        dragGainDb_ = clip.gainDb;
+        dragMouseSeconds_ = xToSeconds(p.x);
+        dragMouseY_ = p.y;
+        dragMode_ = DragMode::Gain;
+        setMouseCursor(juce::MouseCursor::UpDownResizeCursor);
+        repaint();
+        return;
+    }
+
     if (clips_ != nullptr && selectedIndex_ >= 0 && selectedIndex_ < static_cast<int>(clips_->size())) {
         const auto b = clipBounds(selectedIndex_);
         const bool inSelectedEdgeGripRow = !b.isEmpty()
@@ -657,6 +737,7 @@ void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
             dragLengthSeconds_ = clip.durationSeconds();
             dragFadeInSeconds_ = clip.fadeInSeconds;
             dragFadeOutSeconds_ = clip.fadeOutSeconds;
+            dragGainDb_ = clip.gainDb;
             dragMouseSeconds_ = xToSeconds(p.x);
             dragMode_ = selectedEdgeMode;
             if (onClipDragStateChanged)
@@ -681,6 +762,7 @@ void MusicTimeline::mouseDown(const juce::MouseEvent& e) {
         dragLengthSeconds_ = clip.durationSeconds();
         dragFadeInSeconds_ = clip.fadeInSeconds;
         dragFadeOutSeconds_ = clip.fadeOutSeconds;
+        dragGainDb_ = clip.gainDb;
         dragMouseSeconds_ = xToSeconds(p.x);
         const bool inEdgeGripRow = p.y >= b.getY() + kClipEdgeHitTopInset && p.y <= b.getBottom();
         if (inEdgeGripRow && p.x <= b.getX() + kClipEdgeHitWidth)
@@ -769,6 +851,15 @@ void MusicTimeline::mouseDrag(const juce::MouseEvent& e) {
         const double fadeOut = juce::jlimit(0.0, maxFade, dragFadeOutSeconds_ - delta);
         if (onAdjustClipFades)
             onAdjustClipFades(draggingIndex_, clip.fadeInSeconds, fadeOut);
+        return;
+    }
+
+    if (dragMode_ == DragMode::Gain) {
+        constexpr double dbPerPixel = 0.35;
+        const double gainDb = juce::jlimit(-60.0, 6.0,
+            dragGainDb_ - static_cast<double>(e.position.y - dragMouseY_) * dbPerPixel);
+        if (onAdjustClipGain)
+            onAdjustClipGain(draggingIndex_, gainDb);
         return;
     }
 
