@@ -1,68 +1,35 @@
 #include "VoiceKnobs.h"
+#include "Theme.h"
 
 #include <cmath>
 
 namespace vc {
 
 namespace {
-const juce::Colour kAccent(0xff6ee07a);      // app green
-const juce::Colour kAccentBright(0xff9effae);
-const juce::Colour kReadout(0xffd6ffdc);     // green-white digits
+const juce::Colour kAccent(0xff2dd4bf);      // app green
+const juce::Colour kAccentBright(0xff7ff0e4);
+const juce::Colour kReadout(0xffd2fbf6);     // green-white digits
 
-juce::Path roundedSegment(juce::Rectangle<float> r) {
-    juce::Path p;
-    p.addRoundedRectangle(r, juce::jmin(r.getWidth(), r.getHeight()) * 0.45f);
-    return p;
-}
-
-void drawSevenSegmentDigit(juce::Graphics& g, int digit, juce::Rectangle<float> area,
-                           juce::Colour colour) {
-    static constexpr bool segments[10][7] = {
-        { true,  true,  true,  true,  true,  true,  false },
-        { false, true,  true,  false, false, false, false },
-        { true,  true,  false, true,  true,  false, true  },
-        { true,  true,  true,  true,  false, false, true  },
-        { false, true,  true,  false, false, true,  true  },
-        { true,  false, true,  true,  false, true,  true  },
-        { true,  false, true,  true,  true,  true,  true  },
-        { true,  true,  true,  false, false, false, false },
-        { true,  true,  true,  true,  true,  true,  true  },
-        { true,  true,  true,  true,  false, true,  true  },
-    };
-
-    digit = juce::jlimit(0, 9, digit);
-    const float t = 3.0f;
-    const juce::Rectangle<float> s[7] = {
-        { area.getX() + 3.0f, area.getY(), area.getWidth() - 6.0f, t },
-        { area.getRight() - t, area.getY() + 3.0f, t, area.getHeight() * 0.5f - 4.0f },
-        { area.getRight() - t, area.getCentreY() + 1.0f, t, area.getHeight() * 0.5f - 4.0f },
-        { area.getX() + 3.0f, area.getBottom() - t, area.getWidth() - 6.0f, t },
-        { area.getX(), area.getCentreY() + 1.0f, t, area.getHeight() * 0.5f - 4.0f },
-        { area.getX(), area.getY() + 3.0f, t, area.getHeight() * 0.5f - 4.0f },
-        { area.getX() + 3.0f, area.getCentreY() - t * 0.5f, area.getWidth() - 6.0f, t },
-    };
-
-    for (int i = 0; i < 7; ++i) {
-        g.setColour(segments[digit][i] ? colour : colour.withAlpha(0.08f));
-        g.fillPath(roundedSegment(s[i]));
-    }
-}
-
-// Two-digit "X.X" readout (0.0-9.9) centred in a small display window.
+// Two-digit (0-99) readout centred in a small recessed display window. Uses
+// clean tabular numerals rather than a seven-segment face so it reads as a
+// modern UI element instead of a calculator.
 void drawReadout(juce::Graphics& g, juce::Rectangle<float> display, float proportional,
-                 juce::Colour colour) {
-    g.setColour(juce::Colour(0xff070b07).withAlpha(0.82f));
-    g.fillRoundedRectangle(display.expanded(5.0f, 4.0f), 4.0f);
-    g.setColour(kAccent.withAlpha(0.32f));
-    g.drawRoundedRectangle(display.expanded(5.0f, 4.0f), 4.0f, 1.0f);
+                 juce::Colour colour, bool drawWell = true) {
+    if (drawWell) {
+        auto well = display.expanded(5.0f, 4.0f);
+        // Recessed well: a touch darker at the top so it reads as carved in.
+        juce::ColourGradient wellGrad(theme::wellFill.brighter(0.04f), well.getCentreX(), well.getBottom(),
+                                      juce::Colour(0xff050705), well.getCentreX(), well.getY(), false);
+        g.setGradientFill(wellGrad);
+        g.fillRoundedRectangle(well, 4.0f);
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.drawRoundedRectangle(well.reduced(0.5f), 4.0f, 1.0f);
+    }
 
     const int value = juce::roundToInt(juce::jlimit(0.0f, 1.0f, proportional) * 99.0f);
-    auto digits = juce::Rectangle<float>(0.0f, 0.0f, 35.0f, display.getHeight()).withCentre(display.getCentre());
-    drawSevenSegmentDigit(g, value / 10, digits.removeFromLeft(15.0f), colour);
-    g.setColour(colour.withAlpha(0.95f));
-    g.fillEllipse(digits.getX() + 1.0f, digits.getBottom() - 5.0f, 3.0f, 3.0f);
-    digits.removeFromLeft(4.0f);
-    drawSevenSegmentDigit(g, value % 10, digits.removeFromLeft(15.0f), colour);
+    g.setFont(theme::readoutFont(display.getHeight() * 0.86f));
+    g.setColour(colour);
+    g.drawText(juce::String(value), display, juce::Justification::centred, false);
 }
 
 // Map slider bounds onto a fixed-size reference square so each ported paint can
@@ -205,9 +172,10 @@ void paintDecayKnobBody(juce::Graphics& g, float ref, float pos, int variant) {
     g.setColour(kReadout);
     g.fillPath(pointer, juce::AffineTransform::rotation(pointerAngle + juce::MathConstants<float>::halfPi, marker.x, marker.y));
 
-    // Centre digital readout.
+    // Centre digital readout — no well/frame; the glass face already reads as a
+    // recessed digital display for these big encoders.
     auto display = juce::Rectangle<float>(0.0f, 0.0f, 42.0f, 31.0f).withCentre(centre.translated(0.0f, 2.0f));
-    drawReadout(g, display, pos, kReadout);
+    drawReadout(g, display, pos, kReadout, /*drawWell*/ false);
 }
 } // namespace
 
@@ -272,7 +240,7 @@ void BasicKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int
             const float a = start + sweep * static_cast<float>(i) / static_cast<float>(totalDots - 1);
             const auto p = centre + juce::Point<float>(std::cos(a), std::sin(a)) * ledRadius;
             const bool active = pos > 0.001f && i <= activeDots;
-            const auto led = active ? kAccentBright : juce::Colour(0xff253026);
+            const auto led = active ? kAccentBright : juce::Colour(0xff213030);
             const float dot = active ? 2.9f : 2.2f;
             if (active) {
                 g.setColour(led.withAlpha(0.22f));
@@ -282,10 +250,11 @@ void BasicKnobLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int
             g.fillEllipse(p.x - dot, p.y - dot, dot * 2.0f, dot * 2.0f);
         }
 
-        // Centre digital readout (unless this knob shows a separate label).
+        // Centre digital readout (unless this knob shows a separate label). No
+        // well/frame — the dark knob face is backdrop enough.
         if (noReadout_.count(&slider) == 0) {
             auto display = juce::Rectangle<float>(0.0f, 0.0f, 42.0f, 31.0f).withCentre(centre);
-            drawReadout(g, display, pos, kReadout);
+            drawReadout(g, display, pos, kReadout, /*drawWell*/ false);
         }
 
         // Top gloss.
@@ -361,17 +330,17 @@ AppLookAndFeel::AppLookAndFeel() {
     setColour(juce::PopupMenu::textColourId, kReadout);
     setColour(juce::PopupMenu::highlightedBackgroundColourId, kAccent.withAlpha(0.85f));
     setColour(juce::PopupMenu::highlightedTextColourId, juce::Colour(0xff0c140d));
-    setColour(juce::ProgressBar::backgroundColourId, juce::Colour(0xff121712));
+    setColour(juce::ProgressBar::backgroundColourId, juce::Colour(0xff0f1513));
     setColour(juce::ProgressBar::foregroundColourId, kAccent);
     setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff141914));
     setColour(juce::TextEditor::textColourId, kReadout);
     setColour(juce::TextEditor::highlightColourId, kAccent.withAlpha(0.30f));
     setColour(juce::TextEditor::outlineColourId, kAccent.withAlpha(0.30f));
     setColour(juce::TextEditor::focusedOutlineColourId, kAccent.withAlpha(0.55f));
-    setColour(juce::Label::textColourId, juce::Colour(0xffcfe8d2));
+    setColour(juce::Label::textColourId, juce::Colour(0xffcfe8e6));
     setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1b211c));
     setColour(juce::TextButton::textColourOffId, kReadout);
-    setColour(juce::ToggleButton::textColourId, juce::Colour(0xffcfe8d2));
+    setColour(juce::ToggleButton::textColourId, juce::Colour(0xffcfe8e6));
     setColour(juce::ToggleButton::tickColourId, kAccent);
     setColour(juce::TabbedComponent::backgroundColourId, juce::Colour(0xff181d18));
     setColour(juce::TabbedButtonBar::tabOutlineColourId, kAccent.withAlpha(0.30f));
@@ -409,7 +378,7 @@ void AppLookAndFeel::drawProgressBar(juce::Graphics& g, juce::ProgressBar& bar, 
     juce::ignoreUnused(bar);
     auto bounds = juce::Rectangle<float>(0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height));
     const float radius = juce::jmin(6.0f, bounds.getHeight() * 0.5f);
-    g.setColour(juce::Colour(0xff121712));
+    g.setColour(juce::Colour(0xff0f1513));
     g.fillRoundedRectangle(bounds, radius);
 
     if (progress >= 0.0 && progress <= 1.0) {
@@ -485,11 +454,9 @@ EncoderGroupPanel::EncoderGroupPanel() {
 }
 
 void EncoderGroupPanel::paint(juce::Graphics& g) {
-    auto bounds = getLocalBounds().toFloat();
-    g.setColour(juce::Colour(0xff121712).withAlpha(0.55f));
-    g.fillRoundedRectangle(bounds, 8.0f);
-    g.setColour(kAccent.withAlpha(0.16f));
-    g.drawRoundedRectangle(bounds.reduced(0.5f), 8.0f, 1.0f);
+    // Group by a single, consistent depth treatment instead of a hard outline:
+    // soft shadow + inset fill + top highlight (see vc::theme::paintPanel).
+    theme::paintPanel(g, getLocalBounds().toFloat().reduced(0.5f), 8.0f, 0.85f);
 }
 
 } // namespace vc

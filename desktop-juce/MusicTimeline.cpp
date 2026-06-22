@@ -4,10 +4,12 @@
 #include <cmath>
 
 namespace {
-constexpr float kClipEdgeGripTopInset = 16.0f;
+constexpr float kClipEdgeGripTopInset = 0.0f;  // grips span the full clip height
 constexpr float kClipEdgeGripWidth = 7.0f;
-constexpr float kClipEdgeHitTopInset = 10.0f;
+constexpr float kClipEdgeHitTopInset = 0.0f;   // so do their resize hit zones
 constexpr float kClipEdgeHitWidth = 16.0f;
+constexpr float kClipLabelLeftPad = 13.0f;     // keep the name clear of the left grip
+constexpr float kClipHandleEdgeInset = 6.0f;   // keep fade dots from hanging off the edge
 constexpr float kClipEnvelopeTopInset = 13.0f;
 constexpr float kClipEnvelopeLowBottomInset = 24.0f;
 constexpr float kClipEnvelopeSilentBottomInset = 8.0f;
@@ -161,7 +163,9 @@ juce::Point<float> MusicTimeline::fadeInHandlePosition(int index) const {
     const auto& clip = (*clips_)[static_cast<std::size_t>(index)];
     auto b = clipBounds(index);
     const double fade = juce::jlimit(0.0, clip.durationSeconds(), clip.fadeInSeconds);
-    return { static_cast<float>(secondsToX(clip.startSeconds + fade)), clipEnvelopeTopY(b, clip) };
+    const float x = juce::jlimit(b.getX() + kClipHandleEdgeInset, b.getRight() - kClipHandleEdgeInset,
+                                 static_cast<float>(secondsToX(clip.startSeconds + fade)));
+    return { x, clipEnvelopeTopY(b, clip) };
 }
 
 juce::Point<float> MusicTimeline::fadeOutHandlePosition(int index) const {
@@ -171,7 +175,9 @@ juce::Point<float> MusicTimeline::fadeOutHandlePosition(int index) const {
     auto b = clipBounds(index);
     const double length = clip.durationSeconds();
     const double fade = juce::jlimit(0.0, length, clip.fadeOutSeconds);
-    return { static_cast<float>(secondsToX(clip.startSeconds + length - fade)), clipEnvelopeTopY(b, clip) };
+    const float x = juce::jlimit(b.getX() + kClipHandleEdgeInset, b.getRight() - kClipHandleEdgeInset,
+                                 static_cast<float>(secondsToX(clip.startSeconds + length - fade)));
+    return { x, clipEnvelopeTopY(b, clip) };
 }
 
 int MusicTimeline::clipAt(juce::Point<float> p) const {
@@ -285,7 +291,7 @@ void MusicTimeline::drawWaveformPeaks(juce::Graphics& g, juce::Rectangle<float> 
     if (peaks.empty() || alpha <= 0.01f)
         return;
 
-    g.setColour(juce::Colour(0xff63d6b0).withAlpha(alpha));
+    g.setColour(juce::Colour(0xff3fd6c4).withAlpha(alpha));
     const float midY = area.getCentreY();
     const float halfH = area.getHeight() * 0.38f;
     const int width = std::max(1, static_cast<int>(area.getWidth()));
@@ -330,7 +336,7 @@ void MusicTimeline::drawWaveform(juce::Graphics& g, juce::Rectangle<float> area)
         return;
     }
 
-    g.setColour(juce::Colour(0xff63d6b0));
+    g.setColour(juce::Colour(0xff3fd6c4));
 
     if (voice_ == nullptr || voice_->getNumSamples() == 0)
         return;
@@ -375,7 +381,9 @@ void MusicTimeline::drawClipWaveform(juce::Graphics& g, const MusicClip& clip, j
     if (columns <= 0)
         return;
 
-    g.setColour(juce::Colour(0xa8ffffff));
+    // Muted cool grey so the background take reads as secondary to the teal
+    // voice waveform above it rather than competing with it.
+    g.setColour(juce::Colour(0x739fb0bd));
     const float midY = wave.getCentreY();
     const float halfH = wave.getHeight() * 0.42f;
     const int pixelColumns = std::max(1, static_cast<int>(wave.getWidth()));
@@ -444,7 +452,7 @@ void MusicTimeline::drawClipFadeOverlay(juce::Graphics& g, const MusicClip& clip
     envelope.lineTo(inX, yFull);
     envelope.lineTo(outX, yFull);
     envelope.lineTo(x1, fadeOut > 0.0 ? ySilent : yFull);
-    g.setColour(juce::Colours::white.withAlpha(selected ? 0.82f : 0.48f));
+    g.setColour(juce::Colour(0xffe6fffb).withAlpha(selected ? 0.72f : 0.34f));
     g.strokePath(envelope, juce::PathStrokeType(selected ? 2.0f : 1.4f));
 
     if (!selected)
@@ -453,9 +461,9 @@ void MusicTimeline::drawClipFadeOverlay(juce::Graphics& g, const MusicClip& clip
     auto drawHandle = [&g](juce::Point<float> p) {
         g.setColour(juce::Colour(0xff15181d));
         g.fillEllipse(p.x - 5.5f, p.y - 5.5f, 11.0f, 11.0f);
-        g.setColour(juce::Colour(0xffeaffed));
+        g.setColour(juce::Colour(0xffe6fffb));
         g.fillEllipse(p.x - 3.8f, p.y - 3.8f, 7.6f, 7.6f);
-        g.setColour(juce::Colour(0xff6ee07a));
+        g.setColour(juce::Colour(0xff2dd4bf));
         g.drawEllipse(p.x - 5.5f, p.y - 5.5f, 11.0f, 11.0f, 1.2f);
     };
     drawHandle(fadeInHandlePosition(selectedIndex_));
@@ -472,7 +480,7 @@ void MusicTimeline::drawClipRemoveButton(juce::Graphics& g, juce::Rectangle<floa
 }
 
 void MusicTimeline::drawPlus(juce::Graphics& g, juce::Rectangle<float> bounds) {
-    g.setColour(juce::Colour(0xff2f7d52));
+    g.setColour(juce::Colour(0xff1f7d72));
     g.fillEllipse(bounds);
     g.setColour(juce::Colours::white);
     const float cx = bounds.getCentreX();
@@ -528,7 +536,7 @@ void MusicTimeline::paint(juce::Graphics& g) {
 
     if (!musicLaneVisible_) {
         const float playheadXOnly = static_cast<float>(secondsToX(playheadSeconds_));
-        g.setColour(juce::Colour(0xff6ee07a));
+        g.setColour(juce::Colour(0xff2dd4bf));
         g.drawLine(playheadXOnly, voiceLane.getY(), playheadXOnly, voiceLane.getBottom(), 2.5f);
         return;
     }
@@ -563,8 +571,8 @@ void MusicTimeline::paint(juce::Graphics& g) {
             }
             const bool overlaps = overlapR > overlapL;
 
-            g.setColour((i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9))
-                            .withAlpha(i == selectedIndex_ ? 0.24f : 0.12f));
+            g.setColour((i == selectedIndex_ ? juce::Colour(0xff3fd6c4) : juce::Colour(0xff8893a3))
+                            .withAlpha(i == selectedIndex_ ? 0.10f : 0.05f));
             if (overlaps) {
                 const juce::Rectangle<int> overlapRect(
                     juce::Rectangle<float>(overlapL, b.getY(), overlapR - overlapL, b.getHeight())
@@ -577,8 +585,8 @@ void MusicTimeline::paint(juce::Graphics& g) {
                 {
                     juce::Graphics::ScopedSaveState s(g);
                     g.reduceClipRegion(overlapRect);
-                    g.setColour((i == selectedIndex_ ? juce::Colour(0xffc7a84a) : juce::Colour(0xff6f7bd9))
-                                    .withAlpha(i == selectedIndex_ ? 0.14f : 0.06f));
+                    g.setColour((i == selectedIndex_ ? juce::Colour(0xff3fd6c4) : juce::Colour(0xff8893a3))
+                                    .withAlpha(i == selectedIndex_ ? 0.06f : 0.025f));
                     g.fillRoundedRectangle(b, 4.0f);
                 }
             } else {
@@ -587,6 +595,7 @@ void MusicTimeline::paint(juce::Graphics& g) {
 
             drawClipWaveform(g, (*clips_)[static_cast<std::size_t>(i)], b);
             auto labelBounds = b.reduced(6, 0);
+            labelBounds.setLeft(b.getX() + kClipLabelLeftPad);
             labelBounds.setY(b.getBottom() - 23.0f);
             labelBounds.setHeight(20.0f);
             float labelClearX = labelBounds.getX();
@@ -626,23 +635,23 @@ void MusicTimeline::paint(juce::Graphics& g) {
             auto b = clipBounds(i);
             if (b.isEmpty())
                 continue;
+            // Fade overlay (and its handle dots) draws last so the dots sit on
+            // top of the full-height edge grips rendered in pass 1.
             drawClipFadeOverlay(g, (*clips_)[static_cast<std::size_t>(i)], b, i == selectedIndex_);
-            if (i == selectedIndex_) {
-                g.setColour(juce::Colour(0xaa101217));
-                const auto edgeGripY = std::min(b.getBottom(), b.getY() + kClipEdgeGripTopInset);
-                const auto edgeGripHeight = std::max(0.0f, b.getBottom() - edgeGripY);
-                g.fillRect(juce::Rectangle<float>(b.getX(), edgeGripY, kClipEdgeGripWidth, edgeGripHeight));
-                g.fillRect(juce::Rectangle<float>(b.getRight() - kClipEdgeGripWidth, edgeGripY,
-                                                  kClipEdgeGripWidth, edgeGripHeight));
+            if (i == selectedIndex_)
                 drawClipRemoveButton(g, removeButtonBounds(i));
-            }
         }
     }
 
     const float playheadX = static_cast<float>(secondsToX(playheadSeconds_));
-    g.setColour(juce::Colour(0xff6ee07a));
+    // Near-white so the playhead stands clear of the teal voice waveform instead
+    // of blending into it. A soft dark halo keeps it readable over bright peaks.
+    g.setColour(juce::Colours::black.withAlpha(0.35f));
     g.drawLine(playheadX, timelineBounds().getY(),
-               playheadX, timelineBounds().getBottom(), 2.5f);
+               playheadX, timelineBounds().getBottom(), 3.5f);
+    g.setColour(juce::Colour(0xfff2f7f6));
+    g.drawLine(playheadX, timelineBounds().getY(),
+               playheadX, timelineBounds().getBottom(), 2.0f);
 }
 
 void MusicTimeline::mouseMove(const juce::MouseEvent& e) {

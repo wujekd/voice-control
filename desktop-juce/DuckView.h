@@ -67,7 +67,7 @@ private:
     static constexpr float kFMax = 20000.0f;
     static constexpr float kMaxDb = 24.0f; // full-scale of the duck dip
     static constexpr float kMaxWaveGain = 12.0f; // cap on scope auto-gain
-    inline static const juce::Colour kGreen { 0xff6ee07a };
+    inline static const juce::Colour kGreen { 0xff2dd4bf };
 
     float freqToX(float f, float x0, float w) const {
         const float t = std::log(f / kFMin) / std::log(kFMax / kFMin);

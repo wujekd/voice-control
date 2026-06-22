@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "Theme.h"
 
 #include <algorithm>
 #include <cmath>
@@ -206,7 +207,7 @@ void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     const auto angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
     const auto stroke = juce::PathStrokeType(strokeWidth, juce::PathStrokeType::curved,
                                              juce::PathStrokeType::rounded);
-    const auto green = juce::Colour(0xff6ee07a);
+    const auto green = juce::Colour(0xff2dd4bf);
 
     juce::Path inactiveArc;
     inactiveArc.addCentredArc(centre.x, centre.y, radius, radius, 0.0f,
@@ -235,7 +236,7 @@ void MainComponent::EncoderLookAndFeel::drawRotarySlider(
     const auto marker = juce::Point<float>(
         centre.x + std::cos(angle - juce::MathConstants<float>::halfPi) * markerDistance,
         centre.y + std::sin(angle - juce::MathConstants<float>::halfPi) * markerDistance);
-    g.setColour(juce::Colour(0xffeaffed).withAlpha(markerFillAlpha));
+    g.setColour(juce::Colour(0xffe6fffb).withAlpha(markerFillAlpha));
     g.fillEllipse(marker.x - markerRadius, marker.y - markerRadius,
                   markerRadius * 2.0f, markerRadius * 2.0f);
     g.setColour(green.withAlpha(markerStrokeAlpha));
@@ -866,12 +867,12 @@ void MainComponent::UtilityIconButton::paintButton(juce::Graphics& g, bool highl
                               base.darker(0.35f), bounds.getX(), bounds.getBottom(), false);
     g.setGradientFill(grad);
     g.fillRoundedRectangle(bounds, radius);
-    g.setColour(juce::Colour(0xff6ee07a).withAlpha(isEnabled() ? 0.40f : 0.20f));
+    g.setColour(juce::Colour(0xff2dd4bf).withAlpha(isEnabled() ? 0.40f : 0.20f));
     g.drawRoundedRectangle(bounds, radius, 1.2f);
 
     auto icon = bounds.withSizeKeepingCentre(juce::jmin(18.0f, bounds.getWidth() - 10.0f),
                                              juce::jmin(18.0f, bounds.getHeight() - 8.0f));
-    g.setColour(isEnabled() ? juce::Colour(0xffd6ffdc) : juce::Colour(0xffd6ffdc).withAlpha(0.5f));
+    g.setColour(isEnabled() ? juce::Colour(0xffd2fbf6) : juce::Colour(0xffd2fbf6).withAlpha(0.5f));
 
     if (icon_ == Icon::Projects) {
         auto tab = icon.withTrimmedBottom(icon.getHeight() * 0.62f);
@@ -2546,7 +2547,7 @@ void MainComponent::updateDuckingUi() {
     player_.setDuckBypassed(!on);
 
     const auto offGrey = juce::Colour(0xff3a3f48);
-    const auto onGreen = juce::Colour(0xff6ee07a);
+    const auto onGreen = juce::Colour(0xff2dd4bf);
     duckOnOffButton_.setColour(juce::TextButton::buttonColourId, offGrey);
     duckOnOffButton_.setColour(juce::TextButton::buttonOnColourId, on ? onGreen : offGrey);
     duckOnOffButton_.setColour(juce::TextButton::textColourOffId,
@@ -2627,7 +2628,7 @@ void MainComponent::timerCallback() {
     signalConnector_.setPlaybackActive(processingAudible);
     playButton_.setButtonText(playing ? "Stop" : "Play");
     // Gentle green backlight while playing (matching the encoders' green); neutral grey otherwise.
-    const auto playCol = playing ? juce::Colour(0xff2f7d52) : juce::Colour(0xff3a3f49);
+    const auto playCol = playing ? juce::Colour(0xff1f7d72) : juce::Colour(0xff3a3f49);
     playButton_.setColour(juce::TextButton::buttonColourId, playCol);
     playButton_.setColour(juce::TextButton::buttonOnColourId, playCol);
 
@@ -2688,7 +2689,11 @@ void MainComponent::timerCallback() {
 }
 
 void MainComponent::paint(juce::Graphics& g) {
-    g.fillAll(juce::Colour(0xff20232a));
+    // Subtle top-down gradient gives the window depth without drawing attention.
+    auto b = getLocalBounds().toFloat();
+    g.setGradientFill(juce::ColourGradient(vc::theme::windowTop, b.getCentreX(), b.getY(),
+                                           vc::theme::windowBottom, b.getCentreX(), b.getBottom(), false));
+    g.fillRect(b);
 }
 
 void MainComponent::resized() {

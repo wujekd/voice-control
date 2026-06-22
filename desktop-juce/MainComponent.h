@@ -287,7 +287,7 @@ private:
     UtilityIconButton settingsButton_ { "Settings", UtilityIconButton::Icon::Settings };
     juce::Label statusLabel_;
 
-    CompMeter compMeter_ { "Comp", 12.0f, juce::Colour(0xff6ee07a), juce::Colour(0xff58b8e8) };
+    CompMeter compMeter_ { "Comp", 12.0f, juce::Colour(0xff2dd4bf), juce::Colour(0xff58b8e8) };
     GrMeter deEssMeter_ { "De-ess", 10.0f, juce::Colour(0xffe0c050) };
     GrMeter limiterMeter_ { "Limiter", 5.0f, juce::Colour(0xffe85858) };
     VuMeter vuMeter_ { "Output" };
