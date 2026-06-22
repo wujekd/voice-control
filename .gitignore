@@ -1,5 +1,6 @@
 .DS_Store
 build/
+build-xcode/
 dist/
 /GAP
 third_party/JUCE/

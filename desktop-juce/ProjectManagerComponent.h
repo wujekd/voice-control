@@ -72,7 +72,7 @@ private:
         if (row < 0 || row >= files_.size())
             return;
         if (selected) {
-            g.setColour(juce::Colour(0xff2f7d52));
+            g.setColour(juce::Colour(0xff1f7d72));
             g.fillRect(0, 0, width, height);
         }
         const auto f = files_[row];

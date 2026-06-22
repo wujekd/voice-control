@@ -64,7 +64,7 @@ void FileDropComponent::paint(juce::Graphics& g) {
     const float cy = icon.getCentreY();
 
     if (busy_) {
-        const auto green = juce::Colour(0xff6ee07a);
+        const auto green = juce::Colour(0xff2dd4bf);
         g.setColour(juce::Colour(0xff15181d));
         g.fillEllipse(icon);
         g.setColour(green.withAlpha(0.22f));
@@ -85,7 +85,7 @@ void FileDropComponent::paint(juce::Graphics& g) {
                 dist -= static_cast<float>(kLedCount);
 
             const float trail = juce::jlimit(0.0f, 1.0f, 1.0f - dist / 5.0f);
-            const auto led = green.interpolatedWith(juce::Colour(0xff253026), 1.0f - trail);
+            const auto led = green.interpolatedWith(juce::Colour(0xff213030), 1.0f - trail);
             const float dot = 2.1f + trail * 1.0f;
             if (trail > 0.45f) {
                 g.setColour(green.withAlpha(0.14f * trail));
@@ -95,7 +95,7 @@ void FileDropComponent::paint(juce::Graphics& g) {
             g.fillEllipse(p.x - dot, p.y - dot, dot * 2.0f, dot * 2.0f);
         }
     } else {
-        g.setColour(highlight_ ? juce::Colours::aqua : juce::Colour(0xff2f7d52));
+        g.setColour(highlight_ ? juce::Colours::aqua : juce::Colour(0xff1f7d72));
         g.fillEllipse(icon);
         g.setColour(juce::Colours::white);
         g.drawLine(cx - 7.0f, cy, cx + 7.0f, cy, 2.0f);

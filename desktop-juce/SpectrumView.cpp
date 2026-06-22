@@ -160,7 +160,7 @@ void SpectrumView::paint(juce::Graphics& g) {
     // They rest exactly under it and droop downward as the compressors pull the
     // level: the first by the glue-comp reduction, the second further by the
     // fast-comp reduction on top, fading as they go.
-    const juce::Colour eqGreen(0xff6ee07a);
+    const juce::Colour eqGreen(0xff2dd4bf);
     g.setColour(eqGreen.withAlpha(0.13f));
     g.strokePath(eqCurvePath(w, plot, midY, glueCompReductionDb_ + fastCompReductionDb_),
                  juce::PathStrokeType(1.5f));

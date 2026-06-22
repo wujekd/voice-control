@@ -2,13 +2,24 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include "Theme.h"
+
 namespace {
 
-inline const juce::Colour kMeterAccent { 0xff6ee07a };
-inline const juce::Colour kMeterAccentBright { 0xff9effae };
-inline const juce::Colour kMeterLedOff { 0xff253026 };
-inline const juce::Colour kMeterLabel { 0xffcfe8d2 };
-inline const juce::Colour kMeterReadout { 0xffd6ffdc };
+inline const juce::Colour kMeterAccent { 0xff2dd4bf };
+inline const juce::Colour kMeterAccentBright { 0xff7ff0e4 };
+inline const juce::Colour kMeterLedOff = vc::theme::ledOff;
+inline const juce::Colour kMeterLabel { 0xffcfe8e6 };
+inline const juce::Colour kMeterReadout { 0xffd2fbf6 };
+
+// Level-meter LED tint by position along the strip: green through most of the
+// range, ramping to amber then red near the top so peaks read at a glance.
+inline juce::Colour levelColourAt(float t) {
+    if (t < 0.72f) return vc::theme::accentBright;
+    if (t < 0.90f) return vc::theme::accentBright.interpolatedWith(vc::theme::warn,
+                                                                   (t - 0.72f) / 0.18f);
+    return vc::theme::warn.interpolatedWith(vc::theme::danger, (t - 0.90f) / 0.10f);
+}
 
 // Per-cell insets inside the meter panel (keeps labels/values off the frame).
 constexpr int kMeterCellPadH = 8;
@@ -114,9 +125,10 @@ void drawStackedStrip(juce::Graphics& g, juce::Rectangle<float> track,
     }
 }
 
+// Output level: a moving RMS bar (front) with a peak marker (back), both tinted
+// green→amber→red by position along the strip.
 void drawDualLevelStrip(juce::Graphics& g, juce::Rectangle<float> track,
-                        float backFraction, float frontFraction,
-                        juce::Colour backColour, juce::Colour frontColour) {
+                        float backFraction, float frontFraction) {
     const float backFrac = juce::jlimit(0.0f, 1.0f, backFraction);
     const float frontFrac = juce::jlimit(0.0f, 1.0f, frontFraction);
     const float ledR = juce::jmin(2.6f, track.getHeight() * 0.17f);
@@ -130,11 +142,12 @@ void drawDualLevelStrip(juce::Graphics& g, juce::Rectangle<float> track,
         const float x = track.getX() + inset + t * span;
         const float pos = static_cast<float>(i + 1) / static_cast<float>(kLedCount);
         const float frontFill = frontScaled - static_cast<float>(i);
+        const juce::Colour litColour = levelColourAt(t);
 
         if (frontFill > 0.0f)
-            drawLedFill(g, { x, track.getCentreY() }, ledR, frontColour, frontFill);
+            drawLedFill(g, { x, track.getCentreY() }, ledR, litColour, frontFill);
         else if (pos <= backFrac)
-            drawLed(g, { x, track.getCentreY() }, ledR, backColour.withAlpha(0.70f), false);
+            drawLed(g, { x, track.getCentreY() }, ledR, litColour.withAlpha(0.32f), false);
         else
             drawLed(g, { x, track.getCentreY() }, ledR, kMeterLedOff, false);
     }
@@ -230,8 +243,7 @@ public:
         const float span = maxDb_ - minDb_;
         const float peakFrac = span > 0.0f ? juce::jlimit(0.0f, 1.0f, (peakDb_ - minDb_) / span) : 0.0f;
         const float rmsFrac = span > 0.0f ? juce::jlimit(0.0f, 1.0f, (rmsDb_ - minDb_) / span) : 0.0f;
-        drawDualLevelStrip(g, ledStripArea(getLocalBounds()), peakFrac, rmsFrac,
-                           kMeterAccent.withAlpha(0.55f), kMeterAccentBright);
+        drawDualLevelStrip(g, ledStripArea(getLocalBounds()), peakFrac, rmsFrac);
     }
 
 private:

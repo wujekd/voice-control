@@ -5,9 +5,9 @@
 namespace vc {
 
 namespace {
-const juce::Colour kAccent(0xff6ee07a);     // app green
-const juce::Colour kAccentBright(0xffaef0b5);
-const juce::Colour kPulse(0xffd6ffdc);
+const juce::Colour kAccent(0xff2dd4bf);     // app green
+const juce::Colour kAccentBright(0xff7ff0e4);
+const juce::Colour kPulse(0xffd2fbf6);
 const juce::Colour kDim(0xff1f2a22);
 
 constexpr float kActiveEnergyFloor = 0.35f;
@@ -145,7 +145,7 @@ void NeuralNetworkPanel::paint(juce::Graphics& g) {
     const float energy = animationEnergy(baseEnergy);
 
     // Subtle grouped-panel chrome so the area reads as a distinct zone.
-    g.setColour(juce::Colour(0xff121712).withAlpha(0.55f));
+    g.setColour(juce::Colour(0xff0f1513).withAlpha(0.55f));
     g.fillRoundedRectangle(bounds, 8.0f);
     g.setColour(kAccent.withAlpha(0.08f + energy * 0.10f));
     g.drawRoundedRectangle(bounds.reduced(0.5f), 8.0f, 1.0f);

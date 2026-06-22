@@ -95,6 +95,22 @@ double softGateGain(double gain, double deadzone) {
     return gain * (t * t * (3.0 - 2.0 * t));
 }
 
+// vc::applyIntensity caps baseAutoEqStrength here (intensity = 1.0).
+constexpr double kStrengthMax = 0.60;
+
+// Corrective gain for one band. Cuts scale linearly with strength. Boosts also
+// scale linearly, but the per-unit deficit is capped so the boost reaches its
+// ceiling exactly at full intensity and glides smoothly below it — without the
+// cap a large deficit would hit the clamp partway up the knob and then stop
+// responding (the presence/air bands saturating around half intensity).
+double correctiveGain(double target, double measuredRel, double strength, double maxBoost) {
+    const double deficit = target - measuredRel;
+    if (deficit <= 0.0)
+        return deficit * strength;
+    const double perUnit = std::min(deficit, maxBoost / kStrengthMax);
+    return perUnit * strength;
+}
+
 std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double strength, double f0) {
     std::vector<EqBand> bands;
     if (!spectrum.valid) return bands;
@@ -112,25 +128,27 @@ std::vector<EqBand> computeAutoEqBands(const SpectrumResult& spectrum, double st
     constexpr double airTarget  = -10.0;
 
     constexpr double kDeadzone = 1.0;
-    constexpr double kMaxCut = 6.0;     // generous cuts (controlling excess is safe)
-    constexpr double kMaxBoost = 4.0;   // conservative boosts
+    constexpr double kMaxCut = 6.0;      // generous cuts (controlling excess is safe)
+    constexpr double kMaxBoost = 4.0;    // conservative boosts
+    constexpr double kMaxPresBoost = 2.5; // keep the presence bump from getting harsh
+    constexpr double kMaxAirBoost = 2.5;  // the high shelf is broad; keep the top gentle
     constexpr double kEmptyFloor = -18.0; // below this a band is ~empty: don't boost it
 
     auto add = [&](EqBand::Type type, double freq, double q, double measuredRel,
-                   double target) {
-        double gain = (target - measuredRel) * strength;
+                   double target, double maxBoost) {
+        double gain = correctiveGain(target, measuredRel, strength, maxBoost);
         // Never boost a near-empty band (would just amplify noise/hiss).
         if (measuredRel < kEmptyFloor) gain = std::min(gain, 0.0);
-        gain = std::clamp(gain, -kMaxCut, kMaxBoost);
+        gain = std::clamp(gain, -kMaxCut, maxBoost);
         gain = softGateGain(gain, kDeadzone);
         if (std::fabs(gain) >= 0.05)
             bands.push_back({ type, freq, gain, q });
     };
 
-    add(EqBand::Type::LowShelf,  layout.lowShelfFreq, 0.7071, balance.lowRel,  lowTarget);
-    add(EqBand::Type::Peak,      layout.mudPeakFreq,  0.9,    balance.mudRel,  mudTarget);
-    add(EqBand::Type::Peak,      4000.0,              0.9,    balance.presRel, presTarget);
-    add(EqBand::Type::HighShelf, 8000.0,              0.7071, balance.airRel,  airTarget);
+    add(EqBand::Type::LowShelf,  layout.lowShelfFreq, 0.7071, balance.lowRel,  lowTarget,  kMaxBoost);
+    add(EqBand::Type::Peak,      layout.mudPeakFreq,  0.9,    balance.mudRel,  mudTarget,  kMaxBoost);
+    add(EqBand::Type::Peak,      4000.0,              0.9,    balance.presRel, presTarget, kMaxPresBoost);
+    add(EqBand::Type::HighShelf, 8000.0,              0.7071, balance.airRel,  airTarget,  kMaxAirBoost);
 
     return bands;
 }
@@ -158,6 +176,8 @@ std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpec
     constexpr double kDeadzone = 1.0;
     constexpr double kMaxCut = 6.0;
     constexpr double kMaxBoost = 4.0;
+    constexpr double kMaxPresBoost = 2.5; // keep the presence bump from getting harsh
+    constexpr double kMaxAirBoost = 2.5;  // the high shelf is broad; keep the top gentle
     constexpr double kEmptyFloor = -18.0;
 
     auto backgroundBoostScale = [](double voiceRel, double dryRel, double target) {
@@ -179,8 +199,8 @@ std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpec
     };
 
     auto add = [&](EqBand::Type type, double freq, double q, double voiceRel,
-                   double dryRel, double target, bool riskyBoost) {
-        double gain = (target - voiceRel) * strength;
+                   double dryRel, double target, bool riskyBoost, double maxBoost) {
+        double gain = correctiveGain(target, voiceRel, strength, maxBoost);
         if (voiceRel < kEmptyFloor)
             gain = std::min(gain, 0.0);
 
@@ -192,16 +212,16 @@ std::vector<EqBand> computeNoiseAwareAutoEqBands(const SpectrumResult& voiceSpec
         if (gain > 0.0 && type != EqBand::Type::Peak && dryRel >= target)
             gain = 0.0;
 
-        gain = std::clamp(gain, -kMaxCut, kMaxBoost);
+        gain = std::clamp(gain, -kMaxCut, maxBoost);
         gain = softGateGain(gain, kDeadzone);
         if (std::fabs(gain) >= 0.05)
             bands.push_back({ type, freq, gain, q });
     };
 
-    add(EqBand::Type::LowShelf,  layout.lowShelfFreq, 0.7071, voice.lowRel,  dry.lowRel,  lowTarget,  false);
-    add(EqBand::Type::Peak,      layout.mudPeakFreq,  0.9,    voice.mudRel,  dry.mudRel,  mudTarget,  false);
-    add(EqBand::Type::Peak,      4000.0,              0.9,    voice.presRel, dry.presRel, presTarget, true);
-    add(EqBand::Type::HighShelf, 8000.0,              0.7071, voice.airRel,  dry.airRel,  airTarget,  true);
+    add(EqBand::Type::LowShelf,  layout.lowShelfFreq, 0.7071, voice.lowRel,  dry.lowRel,  lowTarget,  false, kMaxBoost);
+    add(EqBand::Type::Peak,      layout.mudPeakFreq,  0.9,    voice.mudRel,  dry.mudRel,  mudTarget,  false, kMaxBoost);
+    add(EqBand::Type::Peak,      4000.0,              0.9,    voice.presRel, dry.presRel, presTarget, true,  kMaxPresBoost);
+    add(EqBand::Type::HighShelf, 8000.0,              0.7071, voice.airRel,  dry.airRel,  airTarget,  true,  kMaxAirBoost);
 
     return bands;
 }
